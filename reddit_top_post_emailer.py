@@ -44,10 +44,10 @@ USAGE
 """
 
 import os
-import re
 import smtplib
 import ssl
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -74,17 +74,29 @@ POSTS_PER_SUB = int(os.environ.get("POSTS_PER_SUB", "5"))
 TIMEFRAME = os.environ.get("TIMEFRAME", "day")  # hour, day, week, month, year, all
 TIMEZONE = os.environ.get("TIMEZONE", "Asia/Ho_Chi_Minh")
 
-THUMB_RE = re.compile(r'<img src="([^"]+)"')
 
-
-def fetch_top_posts(subreddit, limit=5, timeframe="day"):
-    """Fetch the top N posts from a subreddit's RSS feed for the given timeframe."""
+def fetch_top_posts(subreddit, limit=5, timeframe="day", retries=3):
+    """Fetch the top N posts from a subreddit's RSS feed for the given timeframe.
+    Retries with backoff on 429 (rate limited), since Reddit's RSS has been
+    seen to rate-limit rapid-fire requests across subreddits in one run.
+    """
     url = REDDIT_RSS_URL.format(subreddit=subreddit)
     params = {"t": timeframe, "limit": limit}
 
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        if resp.status_code == 429:
+            last_error = f"429 rate limited (attempt {attempt}/{retries})"
+            if attempt < retries:
+                time.sleep(5 * attempt)
+                continue
+            resp.raise_for_status()
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        break
+    else:
+        raise requests.RequestException(last_error)
 
     posts = []
     for entry in root.findall("atom:entry", ATOM_NS)[:limit]:
@@ -101,24 +113,23 @@ def fetch_top_posts(subreddit, limit=5, timeframe="day"):
         author_el = entry.find("atom:author/atom:name", ATOM_NS)
         author = author_el.text.lstrip("/u/") if author_el is not None and author_el.text else "unknown"
 
-        content_el = entry.find("atom:content", ATOM_NS)
-        content_html = content_el.text if content_el is not None and content_el.text else ""
-        thumb_match = THUMB_RE.search(content_html)
-        thumbnail = thumb_match.group(1) if thumb_match else None
-
         posts.append({
             "title": title,
             "author": author,
             "url": link,
-            "thumbnail": thumbnail,
         })
     return posts
 
 
 def collect_all_posts(subreddits, per_sub, timeframe):
-    """Fetch top posts for every subreddit, skipping any that fail."""
+    """Fetch top posts for every subreddit, skipping any that fail. A short
+    delay between requests reduces the chance of hitting Reddit's rate limit
+    when fetching multiple subreddits back-to-back.
+    """
     sections = {}
-    for sub in subreddits:
+    for i, sub in enumerate(subreddits):
+        if i > 0:
+            time.sleep(2)
         try:
             sections[sub] = fetch_top_posts(sub, limit=per_sub, timeframe=timeframe)
             print(f"  r/{sub}: fetched {len(sections[sub])} post(s)")
@@ -135,23 +146,13 @@ def build_section_html(subreddit, posts):
 <p style="color:#999; font-size:13px; font-family:Arial,Helvetica,sans-serif;">No posts found.</p>"""
 
     rows = []
-    for p in posts:
+    for i, p in enumerate(posts, start=1):
         title_esc = escape(p["title"])
-        thumb = (
-            f'<img src="{escape(p["thumbnail"])}" width="64" height="64" style="border-radius:6px; object-fit:cover;">'
-            if p["thumbnail"]
-            else '<div style="width:64px; height:64px; background:#f0f0f0; border-radius:6px;"></div>'
-        )
         rows.append(f"""
 <tr>
-  <td style="padding:10px 0; border-bottom:1px solid #eee;">
-    <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-      <td style="vertical-align:top; padding-right:12px;">{thumb}</td>
-      <td style="vertical-align:top; font-family:Arial,Helvetica,sans-serif;">
-        <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{title_esc}</a>
-        <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
-      </td>
-    </tr></table>
+  <td style="padding:10px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
+    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
+    <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
   </td>
 </tr>""")
 
