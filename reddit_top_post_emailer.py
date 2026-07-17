@@ -2,37 +2,30 @@
 """
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-Fetches the top posts from your chosen subreddits via Reddit's official OAuth
-API and emails you a digest, grouped by subreddit and ranked by upvotes.
+Fetches the top posts from your chosen subreddits via Reddit's public RSS
+feeds and emails you a digest, grouped by subreddit.
 
-Reddit blocks unauthenticated requests from cloud/datacenter IPs (like GitHub
-Actions runners) with a 403, regardless of User-Agent - so this uses Reddit's
-free "script app" OAuth flow instead of the old public .json scrape endpoint.
-That flow is authenticated, so it works reliably from GitHub Actions.
+NOTE ON RELIABILITY
+--------------------
+As of 2026, Reddit has largely closed off new API/OAuth app registration for
+personal projects, and blocks a lot of unauthenticated traffic from cloud
+IPs (like GitHub Actions runners) with a 403. This script uses Reddit's
+public RSS feeds instead, which historically have been more lenient - but
+there's no guarantee Reddit won't tighten this up too. Run the workflow
+manually once after setup (Actions tab -> "Run workflow") to confirm it
+still works before relying on the schedule.
 
 SETUP
 -----
 1. Install dependencies:
      pip install requests
 
-2. Create a free Reddit "script" app to get API credentials:
-     - Go to https://www.reddit.com/prefs/apps
-     - Click "create app" / "create another app" (bottom of the page)
-     - Name: anything, e.g. "reddit-top-post-emailer"
-     - Type: select "script"
-     - redirect uri: http://localhost:8080 (required, but unused)
-     - Click "create app"
-     - Copy the string under the app name (that's your CLIENT_ID) and the
-       "secret" field (that's your CLIENT_SECRET)
-
-3. Create a Gmail "App Password" (regular Gmail passwords won't work with SMTP):
+2. Create a Gmail "App Password" (regular Gmail passwords won't work with SMTP):
      - Go to https://myaccount.google.com/apppasswords
      - You need 2-Step Verification turned on first.
      - Create an app password for "Mail" and copy the 16-character code.
 
-4. Set these as environment variables:
-     export REDDIT_CLIENT_ID="your-client-id"
-     export REDDIT_CLIENT_SECRET="your-client-secret"
+3. Set these as environment variables:
      export GMAIL_ADDRESS="youraddress@gmail.com"
      export GMAIL_APP_PASSWORD="16-char-app-password"
      export REDDIT_RECIPIENT="where-to-send@example.com"
@@ -51,9 +44,11 @@ USAGE
 """
 
 import os
+import re
 import smtplib
 import ssl
 import sys
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -61,77 +56,73 @@ from html import escape
 
 import requests
 
-# Reddit's OAuth token + API endpoints (authenticated - works from any IP,
-# unlike the old public .json scrape endpoint which cloud providers get 403'd on)
-REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-REDDIT_OAUTH_TOP_URL = "https://oauth.reddit.com/r/{subreddit}/top"
+# Reddit's public RSS feed for a subreddit's top posts (Atom format).
+REDDIT_RSS_URL = "https://www.reddit.com/r/{subreddit}/top/.rss"
 
-# Reddit requires a descriptive User-Agent identifying your app; generic ones
-# (e.g. default "python-requests") get rate-limited harder or blocked.
-USER_AGENT = "script:reddit-top-post-emailer:1.0 (by /u/reddit-top-post-emailer-bot)"
+ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+# A browser-like User-Agent tends to fare better against Reddit's bot
+# detection than a generic/default one.
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/atom+xml, application/xml, text/xml, */*",
+}
 
 SUBREDDITS = [s.strip() for s in os.environ.get("SUBREDDITS", "programming,python,technology").split(",") if s.strip()]
 POSTS_PER_SUB = int(os.environ.get("POSTS_PER_SUB", "5"))
 TIMEFRAME = os.environ.get("TIMEFRAME", "day")  # hour, day, week, month, year, all
 TIMEZONE = os.environ.get("TIMEZONE", "Asia/Ho_Chi_Minh")
 
+THUMB_RE = re.compile(r'<img src="([^"]+)"')
 
-def get_access_token():
-    """Authenticate as a Reddit "script" app (client-credentials grant) and
-    return a bearer token. This app-only flow doesn't require a Reddit user
-    login - just the app's client ID/secret.
-    """
-    client_id = os.environ.get("REDDIT_CLIENT_ID")
-    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        print("Missing REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET environment variables.", file=sys.stderr)
-        sys.exit(1)
 
-    resp = requests.post(
-        REDDIT_TOKEN_URL,
-        auth=(client_id, client_secret),
-        data={"grant_type": "client_credentials"},
-        headers={"User-Agent": USER_AGENT},
-        timeout=15,
-    )
+def fetch_top_posts(subreddit, limit=5, timeframe="day"):
+    """Fetch the top N posts from a subreddit's RSS feed for the given timeframe."""
+    url = REDDIT_RSS_URL.format(subreddit=subreddit)
+    params = {"t": timeframe, "limit": limit}
+
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
     resp.raise_for_status()
-    return resp.json()["access_token"]
-
-
-def fetch_top_posts(subreddit, token, limit=5, timeframe="day"):
-    """Fetch the top N posts from a subreddit for the given timeframe."""
-    url = REDDIT_OAUTH_TOP_URL.format(subreddit=subreddit)
-    params = {"limit": limit, "t": timeframe}
-    headers = {"User-Agent": USER_AGENT, "Authorization": f"Bearer {token}"}
-
-    resp = requests.get(url, headers=headers, params=params, timeout=15)
-    resp.raise_for_status()
-    children = resp.json().get("data", {}).get("children", [])
+    root = ET.fromstring(resp.content)
 
     posts = []
-    for child in children:
-        d = child.get("data", {})
-        if d.get("over_18"):
-            continue
+    for entry in root.findall("atom:entry", ATOM_NS)[:limit]:
+        title_el = entry.find("atom:title", ATOM_NS)
+        title = title_el.text if title_el is not None else "Untitled post"
+
+        link = None
+        for link_el in entry.findall("atom:link", ATOM_NS):
+            href = link_el.get("href")
+            if href:
+                link = href
+                break
+
+        author_el = entry.find("atom:author/atom:name", ATOM_NS)
+        author = author_el.text.lstrip("/u/") if author_el is not None and author_el.text else "unknown"
+
+        content_el = entry.find("atom:content", ATOM_NS)
+        content_html = content_el.text if content_el is not None and content_el.text else ""
+        thumb_match = THUMB_RE.search(content_html)
+        thumbnail = thumb_match.group(1) if thumb_match else None
+
         posts.append({
-            "title": d.get("title", "Untitled post"),
-            "score": d.get("score", 0),
-            "num_comments": d.get("num_comments", 0),
-            "author": d.get("author", "unknown"),
-            "url": f"https://reddit.com{d.get('permalink', '')}",
-            "thumbnail": d.get("thumbnail") if str(d.get("thumbnail", "")).startswith("http") else None,
+            "title": title,
+            "author": author,
+            "url": link,
+            "thumbnail": thumbnail,
         })
     return posts
 
 
-def collect_all_posts(subreddits, token, per_sub, timeframe):
+def collect_all_posts(subreddits, per_sub, timeframe):
     """Fetch top posts for every subreddit, skipping any that fail."""
     sections = {}
     for sub in subreddits:
         try:
-            sections[sub] = fetch_top_posts(sub, token, limit=per_sub, timeframe=timeframe)
+            sections[sub] = fetch_top_posts(sub, limit=per_sub, timeframe=timeframe)
             print(f"  r/{sub}: fetched {len(sections[sub])} post(s)")
-        except requests.RequestException as e:
+        except (requests.RequestException, ET.ParseError) as e:
             print(f"  r/{sub}: failed to fetch - {e}", file=sys.stderr)
             sections[sub] = []
     return sections
@@ -157,8 +148,8 @@ def build_section_html(subreddit, posts):
     <table role="presentation" cellpadding="0" cellspacing="0"><tr>
       <td style="vertical-align:top; padding-right:12px;">{thumb}</td>
       <td style="vertical-align:top; font-family:Arial,Helvetica,sans-serif;">
-        <a href="{escape(p['url'])}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{title_esc}</a>
-        <div style="font-size:12px; color:#888; margin-top:4px;">&#9650; {p['score']:,} &nbsp;|&nbsp; &#128172; {p['num_comments']:,} &nbsp;|&nbsp; u/{escape(p['author'])}</div>
+        <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{title_esc}</a>
+        <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
       </td>
     </tr></table>
   </td>
@@ -191,7 +182,7 @@ def build_plain_text(sections):
     for sub, posts in sections.items():
         lines.append(f"--- r/{sub} ---")
         for p in posts:
-            lines.append(f"{p['title']} ({p['score']} upvotes, {p['num_comments']} comments) - {p['url']}")
+            lines.append(f"{p['title']} (u/{p['author']}) - {p['url']}")
         lines.append("")
     return "\n".join(lines)
 
@@ -226,11 +217,8 @@ def send_email(subject, html, text):
 
 
 def main():
-    print("Authenticating with Reddit...")
-    token = get_access_token()
-
     print(f"Fetching top posts (timeframe={TIMEFRAME}) from: {', '.join(SUBREDDITS)}")
-    sections = collect_all_posts(SUBREDDITS, token, POSTS_PER_SUB, TIMEFRAME)
+    sections = collect_all_posts(SUBREDDITS, POSTS_PER_SUB, TIMEFRAME)
 
     total = sum(len(posts) for posts in sections.values())
     if total == 0:
