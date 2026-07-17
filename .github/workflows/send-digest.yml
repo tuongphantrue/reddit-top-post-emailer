@@ -26,6 +26,6 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           REDDIT_RECIPIENT: ${{ secrets.REDDIT_RECIPIENT }}
           SUBREDDITS: "programming,python,technology"
-          POSTS_PER_SUB: "5"
+          POSTS_PER_SUB: "15"
           TIMEFRAME: "day"
         run: python reddit_top_post_emailer.py
