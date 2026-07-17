@@ -2,7 +2,7 @@ name: Send Top Reddit Posts of the Day
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   
+    - cron: "*/30 * * * *"   # every 30 minutes
   workflow_dispatch: {}     # lets you trigger it manually from the Actions tab
 
 jobs:
@@ -22,6 +22,8 @@ jobs:
 
       - name: Fetch posts and send email
         env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           REDDIT_RECIPIENT: ${{ secrets.REDDIT_RECIPIENT }}
