@@ -20,19 +20,33 @@ to run on your own machine.
    - `requirements.txt`
    - `.github/workflows/send-digest.yml`
 
-4. **Create a Gmail App Password** (your normal Gmail password won't work):
+4. **Create a free Reddit "script" app** (Reddit blocks unauthenticated
+   requests from cloud IPs like GitHub Actions, so this uses Reddit's
+   official OAuth API instead of scraping):
+   - Go to https://www.reddit.com/prefs/apps
+   - Click "create app" / "create another app" (bottom of the page)
+   - Name: anything, e.g. `reddit-top-post-emailer`
+   - Type: select **script**
+   - redirect uri: `http://localhost:8080` (required field, but unused)
+   - Click "create app"
+   - Copy the string under the app name (that's your **client ID**) and the
+     "secret" field (that's your **client secret**)
+
+5. **Create a Gmail App Password** (your normal Gmail password won't work):
    - Turn on 2-Step Verification: https://myaccount.google.com/signinoptions/two-step-verification
    - Then create an app password: https://myaccount.google.com/apppasswords
    - Choose "Mail" as the app, copy the 16-character password it gives you.
 
-5. **Add your secrets to the repo** (this keeps your email/password out of the code):
+6. **Add your secrets to the repo** (this keeps your credentials out of the code):
    - In your repo: Settings -> Secrets and variables -> Actions -> "New repository secret"
-   - Add three secrets:
+   - Add five secrets:
+     - `REDDIT_CLIENT_ID` = the client ID from step 4
+     - `REDDIT_CLIENT_SECRET` = the client secret from step 4
      - `GMAIL_ADDRESS` = your Gmail address
-     - `GMAIL_APP_PASSWORD` = the 16-character app password from step 4
+     - `GMAIL_APP_PASSWORD` = the 16-character app password from step 5
      - `REDDIT_RECIPIENT` = the email address that should receive the digest
 
-6. **Test it manually**
+7. **Test it manually**
    - Go to the "Actions" tab in your repo
    - Click "Send Top Reddit Posts of the Day" on the left
    - Click "Run workflow" -> "Run workflow" (green button)
