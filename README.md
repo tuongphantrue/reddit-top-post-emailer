@@ -20,33 +20,19 @@ to run on your own machine.
    - `requirements.txt`
    - `.github/workflows/send-digest.yml`
 
-4. **Create a free Reddit "script" app** (Reddit blocks unauthenticated
-   requests from cloud IPs like GitHub Actions, so this uses Reddit's
-   official OAuth API instead of scraping):
-   - Go to https://www.reddit.com/prefs/apps
-   - Click "create app" / "create another app" (bottom of the page)
-   - Name: anything, e.g. `reddit-top-post-emailer`
-   - Type: select **script**
-   - redirect uri: `http://localhost:8080` (required field, but unused)
-   - Click "create app"
-   - Copy the string under the app name (that's your **client ID**) and the
-     "secret" field (that's your **client secret**)
-
-5. **Create a Gmail App Password** (your normal Gmail password won't work):
+4. **Create a Gmail App Password** (your normal Gmail password won't work):
    - Turn on 2-Step Verification: https://myaccount.google.com/signinoptions/two-step-verification
    - Then create an app password: https://myaccount.google.com/apppasswords
    - Choose "Mail" as the app, copy the 16-character password it gives you.
 
-6. **Add your secrets to the repo** (this keeps your credentials out of the code):
+5. **Add your secrets to the repo** (this keeps your email/password out of the code):
    - In your repo: Settings -> Secrets and variables -> Actions -> "New repository secret"
-   - Add five secrets:
-     - `REDDIT_CLIENT_ID` = the client ID from step 4
-     - `REDDIT_CLIENT_SECRET` = the client secret from step 4
+   - Add three secrets:
      - `GMAIL_ADDRESS` = your Gmail address
-     - `GMAIL_APP_PASSWORD` = the 16-character app password from step 5
+     - `GMAIL_APP_PASSWORD` = the 16-character app password from step 4
      - `REDDIT_RECIPIENT` = the email address that should receive the digest
 
-7. **Test it manually**
+6. **Test it manually**
    - Go to the "Actions" tab in your repo
    - Click "Send Top Reddit Posts of the Day" on the left
    - Click "Run workflow" -> "Run workflow" (green button)
@@ -70,16 +56,30 @@ per subreddit) and `TIMEFRAME` (`hour`, `day`, `week`, `month`, `year`, `all`).
 
 Open `.github/workflows/send-digest.yml` and edit this line:
 ```
-- cron: "0 9 * * *"
+- cron: "*/30 * * * *"
 ```
 Cron format is `minute hour day month weekday`, always in **UTC**. Examples:
+- `*/30 * * * *` -> every 30 minutes (current setting)
 - `0 2 * * *` -> 2:00 AM UTC daily (9:00 AM in Vietnam, UTC+7)
-- `30 23 * * *` -> 11:30 PM UTC daily
 - `0 9 * * 1-5` -> 9:00 AM UTC, weekdays only
 
 A handy converter: https://crontab.guru (shows what a cron string means, but
 you still need to convert your local time to UTC yourself, e.g. via
 https://www.timeanddate.com/worldclock/converter.html)
+
+## A note on reliability
+
+This fetches posts via Reddit's public RSS feeds rather than the official
+API, because as of 2026 Reddit has largely closed off new personal API app
+registration. RSS has historically been more lenient toward unauthenticated
+requests than the JSON scrape endpoint, but Reddit could tighten this up at
+any time without notice. If a run starts failing with 403s again, check the
+Actions tab logs first - there's currently no fully "official" workaround
+available for new personal projects.
+
+Also note: since this runs every 30 minutes with no de-duplication, you'll
+get repeat emails of the same top posts throughout the day. Let me know if
+you'd like a "don't re-send the same post" tracker added.
 
 ## Notes
 
