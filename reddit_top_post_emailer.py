@@ -2,15 +2,16 @@
 """
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-Fetches the top posts from your chosen subreddits via Reddit's public RSS
-feeds and emails you a digest, grouped by subreddit.
+Fetches the top posts from all of Reddit (r/all) via Reddit's public RSS
+feed and emails you a digest, grouped by subreddit. Subreddits in
+BLACKLIST_SUBREDDITS are filtered out before the email is built.
 
 NOTE ON RELIABILITY
 --------------------
 As of 2026, Reddit has largely closed off new API/OAuth app registration for
 personal projects, and blocks a lot of unauthenticated traffic from cloud
 IPs (like GitHub Actions runners) with a 403. This script uses Reddit's
-public RSS feeds instead, which historically have been more lenient - but
+public RSS feed instead, which historically have been more lenient - but
 there's no guarantee Reddit won't tighten this up too. Run the workflow
 manually once after setup (Actions tab -> "Run workflow") to confirm it
 still works before relying on the schedule.
@@ -29,9 +30,9 @@ SETUP
      export GMAIL_ADDRESS="youraddress@gmail.com"
      export GMAIL_APP_PASSWORD="16-char-app-password"
      export REDDIT_RECIPIENT="where-to-send@example.com"
-     export SUBREDDITS="programming,python,technology"   # optional, comma-separated
-     export POSTS_PER_SUB="5"                             # optional, top N per subreddit
+     export POSTS_TOTAL="50"                               # optional, top N posts from r/all
      export TIMEFRAME="day"                                # optional: hour/day/week/month/year/all
+     export BLACKLIST_SUBREDDITS=""                         # optional, comma-separated, e.g. "nsfw,gonewild"
 
 SCHEDULING
 ----------
@@ -44,6 +45,7 @@ USAGE
 """
 
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -56,8 +58,8 @@ from html import escape
 
 import requests
 
-# Reddit's public RSS feed for a subreddit's top posts (Atom format).
-REDDIT_RSS_URL = "https://www.reddit.com/r/{subreddit}/top/.rss"
+# Reddit's public RSS feed for r/all's top posts (Atom format).
+REDDIT_RSS_URL = "https://www.reddit.com/r/all/top/.rss"
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
@@ -69,23 +71,25 @@ HEADERS = {
     "Accept": "application/atom+xml, application/xml, text/xml, */*",
 }
 
-SUBREDDITS = [s.strip() for s in os.environ.get("SUBREDDITS", "programming,python,technology").split(",") if s.strip()]
-POSTS_PER_SUB = int(os.environ.get("POSTS_PER_SUB", "5"))
+POSTS_TOTAL = int(os.environ.get("POSTS_TOTAL", "50"))
 TIMEFRAME = os.environ.get("TIMEFRAME", "day")  # hour, day, week, month, year, all
 TIMEZONE = os.environ.get("TIMEZONE", "Asia/Ho_Chi_Minh")
+BLACKLIST_SUBREDDITS = {
+    s.strip().lower() for s in os.environ.get("BLACKLIST_SUBREDDITS", "").split(",") if s.strip()
+}
+
+SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 
 
-def fetch_top_posts(subreddit, limit=5, timeframe="day", retries=3):
-    """Fetch the top N posts from a subreddit's RSS feed for the given timeframe.
-    Retries with backoff on 429 (rate limited), since Reddit's RSS has been
-    seen to rate-limit rapid-fire requests across subreddits in one run.
+def fetch_top_posts(limit=50, timeframe="day", retries=3):
+    """Fetch the top N posts from r/all's RSS feed for the given timeframe.
+    Retries with backoff on 429 (rate limited).
     """
-    url = REDDIT_RSS_URL.format(subreddit=subreddit)
     params = {"t": timeframe, "limit": limit}
 
     last_error = None
     for attempt in range(1, retries + 1):
-        resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        resp = requests.get(REDDIT_RSS_URL, headers=HEADERS, params=params, timeout=15)
         if resp.status_code == 429:
             last_error = f"429 rate limited (attempt {attempt}/{retries})"
             if attempt < retries:
@@ -113,38 +117,36 @@ def fetch_top_posts(subreddit, limit=5, timeframe="day", retries=3):
         author_el = entry.find("atom:author/atom:name", ATOM_NS)
         author = author_el.text.lstrip("/u/") if author_el is not None and author_el.text else "unknown"
 
+        sub_match = SUBREDDIT_FROM_URL_RE.search(link or "")
+        subreddit = sub_match.group(1) if sub_match else "unknown"
+
         posts.append({
             "title": title,
             "author": author,
             "url": link,
+            "subreddit": subreddit,
         })
     return posts
 
 
-def collect_all_posts(subreddits, per_sub, timeframe):
-    """Fetch top posts for every subreddit, skipping any that fail. A short
-    delay between requests reduces the chance of hitting Reddit's rate limit
-    when fetching multiple subreddits back-to-back.
+def group_by_subreddit(posts, blacklist):
+    """Group posts by subreddit, dropping any post whose subreddit is
+    blacklisted (case-insensitive). Preserves the order subreddits first
+    appear in (i.e. roughly by top post rank).
     """
     sections = {}
-    for i, sub in enumerate(subreddits):
-        if i > 0:
-            time.sleep(2)
-        try:
-            sections[sub] = fetch_top_posts(sub, limit=per_sub, timeframe=timeframe)
-            print(f"  r/{sub}: fetched {len(sections[sub])} post(s)")
-        except (requests.RequestException, ET.ParseError) as e:
-            print(f"  r/{sub}: failed to fetch - {e}", file=sys.stderr)
-            sections[sub] = []
+    skipped = 0
+    for p in posts:
+        if p["subreddit"].lower() in blacklist:
+            skipped += 1
+            continue
+        sections.setdefault(p["subreddit"], []).append(p)
+    if skipped:
+        print(f"  Filtered out {skipped} post(s) from blacklisted subreddit(s)")
     return sections
 
 
 def build_section_html(subreddit, posts):
-    if not posts:
-        return f"""
-<h2 style="color:#222; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
-<p style="color:#999; font-size:13px; font-family:Arial,Helvetica,sans-serif;">No posts found.</p>"""
-
     rows = []
     for i, p in enumerate(posts, start=1):
         title_esc = escape(p["title"])
@@ -218,10 +220,20 @@ def send_email(subject, html, text):
 
 
 def main():
-    print(f"Fetching top posts (timeframe={TIMEFRAME}) from: {', '.join(SUBREDDITS)}")
-    sections = collect_all_posts(SUBREDDITS, POSTS_PER_SUB, TIMEFRAME)
+    print(f"Fetching top {POSTS_TOTAL} posts from r/all (timeframe={TIMEFRAME})...")
+    if BLACKLIST_SUBREDDITS:
+        print(f"Blacklisted subreddits: {', '.join(sorted(BLACKLIST_SUBREDDITS))}")
 
-    total = sum(len(posts) for posts in sections.values())
+    try:
+        posts = fetch_top_posts(limit=POSTS_TOTAL, timeframe=TIMEFRAME)
+        print(f"  fetched {len(posts)} post(s)")
+    except (requests.RequestException, ET.ParseError) as e:
+        print(f"  failed to fetch - {e}", file=sys.stderr)
+        posts = []
+
+    sections = group_by_subreddit(posts, BLACKLIST_SUBREDDITS)
+
+    total = sum(len(v) for v in sections.values())
     if total == 0:
         print("No posts found - not sending an email.")
         return
