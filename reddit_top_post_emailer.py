@@ -216,6 +216,9 @@ def enrich_posts(posts):
         p["image"] = image_url
         p["body"] = body_text
     return posts
+
+
+def group_by_subreddit(posts, blacklist):
     """Group posts by subreddit, dropping any post whose subreddit is
     blacklisted (case-insensitive). Preserves the order subreddits first
     appear in (i.e. roughly by top post rank).
