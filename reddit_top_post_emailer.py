@@ -3,30 +3,28 @@
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
 Fetches the top posts from all of Reddit (r/all) via Reddit's public RSS
-feed, then fetches each post's own JSON data to get its score (net
-upvotes), thumbnail/preview image, and full self-text body (for text
-posts) - and emails you a digest, grouped by subreddit. Subreddits in
-BLACKLIST_SUBREDDITS are filtered out before the email is built.
+feed, then fetches each post's own RSS feed to get its thumbnail/preview
+image and full self-text body (for text posts) - and emails you a digest,
+grouped by subreddit. Subreddits in BLACKLIST_SUBREDDITS are filtered out
+before the email is built.
 
-NOTE ON VOTES: Reddit only ever exposes net score (upvotes minus
-downvotes) - it does not expose upvote and downvote counts separately, to
-anyone, via any method. That's a Reddit platform limitation, not something
-this script can work around.
+NOTE ON SCORE/VOTES: An earlier version of this script tried to also
+include each post's score via Reddit's JSON endpoint, but that endpoint
+was confirmed blocked (403) from GitHub Actions IPs in testing - every
+post came back empty. So this version sticks to RSS only, which is
+confirmed to work for image + body. Score/upvotes aren't included as a
+result. Downvotes were never available either way - Reddit doesn't expose
+upvote/downvote counts separately to anyone, via any method, ever.
 
-COST OF INCLUDING SCORE/IMAGES/BODY TEXT
-------------------------------------------
-Getting a post's score, image, and full body requires one extra request
-per post (Reddit's subreddit-level RSS only gives title + link). With
-POSTS_TOTAL=50 that's up to 51 requests per run instead of 1, with a
-1-second gap between each - so a run now takes roughly a minute instead of
-a few seconds, and is more likely to hit Reddit's rate limiting (handled
-with retries, but not guaranteed to always succeed). The per-post requests
-use Reddit's JSON endpoint rather than RSS - if that gets blocked (403)
-from GitHub Actions IPs the way the old subreddit-listing JSON endpoint
-did, the script detects repeated blocks and stops trying further posts
-early rather than wasting the full run retrying every one. If this becomes
-too flaky on your schedule, lowering POSTS_TOTAL or the run frequency
-helps.
+COST OF INCLUDING IMAGES/BODY TEXT
+------------------------------------
+Getting a post's image and full body requires one extra request per post
+(Reddit's subreddit-level RSS only gives title + link). With POSTS_TOTAL=50
+that's up to 51 requests per run instead of 1, with a 1-second gap between
+each - so a run now takes roughly a minute instead of a few seconds, and is
+more likely to hit Reddit's rate limiting (handled with retries, but not
+guaranteed to always succeed). If this becomes too flaky on your schedule,
+lowering POSTS_TOTAL or the run frequency helps.
 
 NOTE ON RELIABILITY
 --------------------
@@ -101,7 +99,29 @@ BLACKLIST_SUBREDDITS = {
 }
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
+IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+TAG_STRIP_RE = re.compile(r'<[^>]+>')
+# Reddit wraps a post's rendered self-text between these two stable markers -
+# used across old and new Reddit for years, more reliable than trying to
+# parse the surrounding table layout.
+SELFTEXT_RE = re.compile(r'<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->', re.IGNORECASE | re.DOTALL)
+
 MAX_BODY_CHARS = 600
+
+# Domains that host actual post images/thumbnails, as opposed to static UI
+# assets (subreddit icons, snoo avatars, etc.) that can also show up as
+# <img> tags in a post's RSS content but aren't the post's own image.
+IMAGE_CONTENT_DOMAINS = (
+    "i.redd.it", "preview.redd.it", "external-preview.redd.it",
+    "i.imgur.com", "imgur.com", "a.thumbs.redditmedia.com",
+    "b.thumbs.redditmedia.com", "external-i.redd.it",
+)
+
+
+def is_real_post_image(url):
+    if not url:
+        return False
+    return any(domain in url.lower() for domain in IMAGE_CONTENT_DOMAINS)
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
@@ -153,21 +173,18 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
 
 
 def fetch_post_detail(permalink, retries=3):
-    """Fetch a single post's own JSON data to get its score, thumbnail/
-    preview image, and full self-text body, if any. Returns a dict:
-    {"score": int_or_None, "image": url_or_None, "body": text_or_""}.
+    """Fetch a single post's own RSS feed (its comments page) to get its
+    thumbnail/preview image and full self-text body, if any. Returns
+    (image_url_or_None, body_text_or_empty_string). Link posts (no
+    self-text) will return an empty body - that's expected, not a failure.
 
-    Uses Reddit's JSON endpoint (not RSS) because JSON gives all three
-    fields directly and structured - no HTML/regex guessing needed. This
-    is a different endpoint than the r/all listing (which stays on RSS),
-    so it's untested against Reddit's cloud-IP blocking; if it 403s, this
-    returns all-None/empty rather than raising, so the run continues.
+    Uses RSS rather than JSON: JSON was tried and confirmed blocked (403)
+    from GitHub Actions IPs, while this RSS endpoint is confirmed to work.
     """
-    empty = {"score": None, "image": None, "body": ""}
     if not permalink:
-        return empty
+        return None, ""
 
-    url = permalink.rstrip("/") + ".json"
+    url = permalink.rstrip("/") + "/.rss"
 
     for attempt in range(1, retries + 1):
         resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -175,46 +192,45 @@ def fetch_post_detail(permalink, retries=3):
             if attempt < retries:
                 time.sleep(3 * attempt)
                 continue
-            return empty
+            return None, ""
         if resp.status_code >= 400:
-            return empty
+            return None, ""
         try:
-            data = resp.json()
-            post_data = data[0]["data"]["children"][0]["data"]
-        except (ValueError, KeyError, IndexError, TypeError):
-            return empty
+            root = ET.fromstring(resp.content)
+        except ET.ParseError:
+            return None, ""
         break
     else:
-        return empty
+        return None, ""
 
-    score = post_data.get("score")
+    first_entry = root.find("atom:entry", ATOM_NS)
+    if first_entry is None:
+        return None, ""
+
+    content_el = first_entry.find("atom:content", ATOM_NS)
+    content_html = content_el.text if content_el is not None and content_el.text else ""
+
+    img_matches = IMG_TAG_RE.findall(content_html)
+    image_url = next((u for u in img_matches if is_real_post_image(u)), None)
 
     body_text = ""
-    selftext = (post_data.get("selftext") or "").strip()
-    if selftext:
-        body_text = selftext[:MAX_BODY_CHARS] + ("..." if len(selftext) > MAX_BODY_CHARS else "")
+    selftext_match = SELFTEXT_RE.search(content_html)
+    if selftext_match:
+        raw = selftext_match.group(1)
+        plain = TAG_STRIP_RE.sub(" ", raw)
+        plain = " ".join(plain.split())  # collapse whitespace
+        if plain:
+            body_text = plain[:MAX_BODY_CHARS] + ("..." if len(plain) > MAX_BODY_CHARS else "")
 
-    image_url = None
-    try:
-        preview_images = post_data.get("preview", {}).get("images", [])
-        if preview_images:
-            image_url = preview_images[0]["source"]["url"].replace("&amp;", "&")
-    except (KeyError, IndexError, TypeError):
-        image_url = None
-    if not image_url:
-        thumb = post_data.get("thumbnail", "")
-        if thumb and thumb.startswith("http"):
-            image_url = thumb
-
-    return {"score": score, "image": image_url, "body": body_text}
+    return image_url, body_text
 
 
 def enrich_posts(posts):
-    """Fetch score + image + body text for each post individually. This
-    means one extra request per post (on top of the single r/all listing
-    request), so it's slower and more rate-limit-prone than the listing
-    fetch alone. If several requests in a row get blocked (403), stop
-    trying further ones - that's a sign of IP-level blocking rather than a
+    """Fetch image + body text for each post individually. This means one
+    extra request per post (on top of the single r/all listing request), so
+    it's slower and more rate-limit-prone than the listing fetch alone. If
+    several requests in a row come back completely empty, stop trying
+    further ones - that's a sign of IP-level blocking rather than a
     per-post issue, so retrying each remaining post would just waste time.
     """
     consecutive_blocked = 0
@@ -223,23 +239,22 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["score"], p["image"], p["body"] = None, None, ""
+            p["image"], p["body"] = None, ""
             continue
 
         try:
-            detail = fetch_post_detail(p["url"])
+            image_url, body_text = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"score": None, "image": None, "body": ""}
+            image_url, body_text = None, ""
 
-        if detail["score"] is None and detail["image"] is None and not detail["body"]:
+        if image_url is None and not body_text:
             consecutive_blocked += 1
         else:
             consecutive_blocked = 0
 
-        p["score"] = detail["score"]
-        p["image"] = detail["image"]
-        p["body"] = detail["body"]
+        p["image"] = image_url
+        p["body"] = body_text
 
     if consecutive_blocked >= 5:
         print("  Per-post detail fetching appears blocked - stopped early to save time.", file=sys.stderr)
@@ -280,9 +295,7 @@ def build_section_html(subreddit, posts):
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
     <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
-    <div style="font-size:12px; color:#888; margin-top:4px;">
-      {'&#11014; ' + format(p['score'], ',') + ' &nbsp;|&nbsp; ' if p.get('score') is not None else ''}u/{escape(p['author'])}
-    </div>
+    <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
   </td>
@@ -315,8 +328,7 @@ def build_plain_text(sections):
     for sub, posts in sections.items():
         lines.append(f"--- r/{sub} ---")
         for p in posts:
-            score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
-            lines.append(f"{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
+            lines.append(f"{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
         lines.append("")
