@@ -1,4 +1,4 @@
-# Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
+[# Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
 This repo emails you the top posts across all of Reddit (r/all) on a
 schedule, automatically, using GitHub's free scheduled-workflow runners.
@@ -96,3 +96,4 @@ you'd like a "don't re-send the same post" tracker added.
 - If the run fails, check the Actions tab -> the failed run -> logs. Common
   causes: a secret is missing/misspelled, or the Gmail app password was
   revoked.
+](https://github.com/tuongphantrue/interest-rate-emailer)
