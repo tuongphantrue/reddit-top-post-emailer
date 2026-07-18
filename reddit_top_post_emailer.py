@@ -172,35 +172,32 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
     return posts
 
 
-def fetch_post_detail(permalink, retries=3):
+def fetch_post_detail(permalink):
     """Fetch a single post's own RSS feed (its comments page) to get its
     thumbnail/preview image and full self-text body, if any. Returns
     (image_url_or_None, body_text_or_empty_string). Link posts (no
     self-text) will return an empty body - that's expected, not a failure.
 
     Uses RSS rather than JSON: JSON was tried and confirmed blocked (403)
-    from GitHub Actions IPs, while this RSS endpoint is confirmed to work.
+    from GitHub Actions IPs, while this RSS endpoint is confirmed to work
+    (at least some of the time - see note on rate limiting below).
+
+    No retry-on-429 here (there used to be one): testing showed retries
+    just burned ~9 extra seconds per blocked post without actually
+    improving the success rate, since the block wasn't transient within a
+    single run. Failing fast keeps a 50-post run to ~1 minute instead of
+    ~8 minutes for the same end result.
     """
     if not permalink:
         return None, ""
 
     url = permalink.rstrip("/") + "/.rss"
-
-    for attempt in range(1, retries + 1):
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code == 429:
-            if attempt < retries:
-                time.sleep(3 * attempt)
-                continue
-            return None, ""
-        if resp.status_code >= 400:
-            return None, ""
-        try:
-            root = ET.fromstring(resp.content)
-        except ET.ParseError:
-            return None, ""
-        break
-    else:
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    if resp.status_code >= 400:
+        return None, ""
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError:
         return None, ""
 
     first_entry = root.find("atom:entry", ATOM_NS)
@@ -234,9 +231,10 @@ def enrich_posts(posts):
     per-post issue, so retrying each remaining post would just waste time.
     """
     consecutive_blocked = 0
+    got_content = 0
     for i, p in enumerate(posts):
         if i > 0:
-            time.sleep(1)
+            time.sleep(2)
 
         if consecutive_blocked >= 5:
             p["image"], p["body"] = None, ""
@@ -252,10 +250,12 @@ def enrich_posts(posts):
             consecutive_blocked += 1
         else:
             consecutive_blocked = 0
+            got_content += 1
 
         p["image"] = image_url
         p["body"] = body_text
 
+    print(f"  Got image/body for {got_content}/{len(posts)} post(s)")
     if consecutive_blocked >= 5:
         print("  Per-post detail fetching appears blocked - stopped early to save time.", file=sys.stderr)
     return posts
