@@ -3,8 +3,19 @@
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
 Fetches the top posts from all of Reddit (r/all) via Reddit's public RSS
-feed and emails you a digest, grouped by subreddit. Subreddits in
+feed and emails you a digest, grouped by subreddit, including each post's
+thumbnail image and full self-text body (for text posts). Subreddits in
 BLACKLIST_SUBREDDITS are filtered out before the email is built.
+
+COST OF INCLUDING IMAGES/BODY TEXT
+------------------------------------
+Getting a post's image and full body requires one extra request per post
+(Reddit's subreddit-level RSS only gives title + link, not the full body).
+With POSTS_TOTAL=50 that's up to 51 requests per run instead of 1, with a
+1-second gap between each - so a run now takes roughly a minute instead of
+a few seconds, and is more likely to hit Reddit's rate limiting (handled
+with retries, but not guaranteed to always succeed). If this becomes too
+flaky on your schedule, lowering POSTS_TOTAL or the run frequency helps.
 
 NOTE ON RELIABILITY
 --------------------
@@ -79,6 +90,14 @@ BLACKLIST_SUBREDDITS = {
 }
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
+IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+TAG_STRIP_RE = re.compile(r'<[^>]+>')
+# Reddit wraps a post's rendered self-text between these two stable markers -
+# used across old and new Reddit for years, more reliable than trying to
+# parse the surrounding table layout.
+SELFTEXT_RE = re.compile(r'<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->', re.IGNORECASE | re.DOTALL)
+
+MAX_BODY_CHARS = 600
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
@@ -129,7 +148,74 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
     return posts
 
 
-def group_by_subreddit(posts, blacklist):
+def fetch_post_detail(permalink, retries=3):
+    """Fetch a single post's own RSS feed (its comments page) to get its
+    thumbnail/preview image and full self-text body, if any. Returns
+    (image_url_or_None, body_text_or_empty_string). Link posts (no
+    self-text) will return an empty body - that's expected, not a failure.
+    """
+    if not permalink:
+        return None, ""
+
+    url = permalink.rstrip("/") + "/.rss"
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 429:
+            last_error = f"429 rate limited (attempt {attempt}/{retries})"
+            if attempt < retries:
+                time.sleep(3 * attempt)
+                continue
+            return None, ""
+        if resp.status_code >= 400:
+            return None, ""
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError:
+            return None, ""
+        break
+    else:
+        return None, ""
+
+    first_entry = root.find("atom:entry", ATOM_NS)
+    if first_entry is None:
+        return None, ""
+
+    content_el = first_entry.find("atom:content", ATOM_NS)
+    content_html = content_el.text if content_el is not None and content_el.text else ""
+
+    img_match = IMG_TAG_RE.search(content_html)
+    image_url = img_match.group(1) if img_match else None
+
+    body_text = ""
+    selftext_match = SELFTEXT_RE.search(content_html)
+    if selftext_match:
+        raw = selftext_match.group(1)
+        plain = TAG_STRIP_RE.sub(" ", raw)
+        plain = " ".join(plain.split())  # collapse whitespace
+        if plain:
+            body_text = plain[:MAX_BODY_CHARS] + ("..." if len(plain) > MAX_BODY_CHARS else "")
+
+    return image_url, body_text
+
+
+def enrich_posts(posts):
+    """Fetch image + body text for each post individually. This means one
+    extra request per post (on top of the single r/all listing request), so
+    it's slower and more rate-limit-prone than the listing fetch alone.
+    """
+    for i, p in enumerate(posts):
+        if i > 0:
+            time.sleep(1)
+        try:
+            image_url, body_text = fetch_post_detail(p["url"])
+        except requests.RequestException as e:
+            print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
+            image_url, body_text = None, ""
+        p["image"] = image_url
+        p["body"] = body_text
+    return posts
     """Group posts by subreddit, dropping any post whose subreddit is
     blacklisted (case-insensitive). Preserves the order subreddits first
     appear in (i.e. roughly by top post rank).
@@ -150,11 +236,22 @@ def build_section_html(subreddit, posts):
     rows = []
     for i, p in enumerate(posts, start=1):
         title_esc = escape(p["title"])
+
+        image_html = ""
+        if p.get("image"):
+            image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
+
+        body_html = ""
+        if p.get("body"):
+            body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
+
         rows.append(f"""
 <tr>
-  <td style="padding:10px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
+  <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
     <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
     <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
+    {body_html}
+    {image_html}
   </td>
 </tr>""")
 
@@ -186,6 +283,8 @@ def build_plain_text(sections):
         lines.append(f"--- r/{sub} ---")
         for p in posts:
             lines.append(f"{p['title']} (u/{p['author']}) - {p['url']}")
+            if p.get("body"):
+                lines.append(f"  {p['body']}")
         lines.append("")
     return "\n".join(lines)
 
@@ -237,6 +336,10 @@ def main():
     if total == 0:
         print("No posts found - not sending an email.")
         return
+
+    print(f"Fetching image + body text for {total} post(s) individually (1 request per post)...")
+    for sub in sections:
+        sections[sub] = enrich_posts(sections[sub])
 
     try:
         from zoneinfo import ZoneInfo
