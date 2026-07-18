@@ -1,8 +1,9 @@
 # Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-This repo emails you the top posts from your chosen subreddits every day,
-automatically, using GitHub's free scheduled-workflow runners. Nothing needs
-to run on your own machine.
+This repo emails you the top posts across all of Reddit (r/all) on a
+schedule, automatically, using GitHub's free scheduled-workflow runners.
+Nothing needs to run on your own machine. You can blacklist subreddits you
+don't want included.
 
 ## One-time setup (~5 minutes)
 
@@ -43,14 +44,20 @@ That's it — from now on it runs automatically every day at the time set in
 `.github/workflows/send-digest.yml` (default 09:00 UTC), with no computer of
 yours needing to be on.
 
-## Changing the subreddits
+## Blacklisting subreddits
 
-Edit the `SUBREDDITS` line in `.github/workflows/send-digest.yml`:
+Edit the `BLACKLIST_SUBREDDITS` line in `.github/workflows/send-digest.yml`:
 ```yaml
-SUBREDDITS: "programming,python,technology"
+BLACKLIST_SUBREDDITS: "nsfw,gonewild,AskReddit"
 ```
-Comma-separated, no spaces needed. You can also adjust `POSTS_PER_SUB` (top N
-per subreddit) and `TIMEFRAME` (`hour`, `day`, `week`, `month`, `year`, `all`).
+Comma-separated subreddit names (no `r/` prefix needed), case-insensitive.
+Any post from a blacklisted subreddit is dropped before the email is built.
+It starts empty — add subreddits to it any time.
+
+You can also adjust `POSTS_TOTAL` (how many top posts to pull from r/all
+before filtering — the blacklist is applied *after* this, so a small
+`POSTS_TOTAL` with a big blacklist might leave few posts) and `TIMEFRAME`
+(`hour`, `day`, `week`, `month`, `year`, `all`).
 
 ## Changing the schedule
 
