@@ -99,6 +99,21 @@ SELFTEXT_RE = re.compile(r'<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->', re.IGNOR
 
 MAX_BODY_CHARS = 600
 
+# Domains that host actual post images/thumbnails, as opposed to static UI
+# assets (subreddit icons, snoo avatars, etc.) that can also show up as
+# <img> tags in a post's RSS content but aren't the post's own image.
+IMAGE_CONTENT_DOMAINS = (
+    "i.redd.it", "preview.redd.it", "external-preview.redd.it",
+    "i.imgur.com", "imgur.com", "a.thumbs.redditmedia.com",
+    "b.thumbs.redditmedia.com", "external-i.redd.it",
+)
+
+
+def is_real_post_image(url):
+    if not url:
+        return False
+    return any(domain in url.lower() for domain in IMAGE_CONTENT_DOMAINS)
+
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
     """Fetch the top N posts from r/all's RSS feed for the given timeframe.
@@ -185,8 +200,8 @@ def fetch_post_detail(permalink, retries=3):
     content_el = first_entry.find("atom:content", ATOM_NS)
     content_html = content_el.text if content_el is not None and content_el.text else ""
 
-    img_match = IMG_TAG_RE.search(content_html)
-    image_url = img_match.group(1) if img_match else None
+    img_matches = IMG_TAG_RE.findall(content_html)
+    image_url = next((u for u in img_matches if is_real_post_image(u)), None)
 
     body_text = ""
     selftext_match = SELFTEXT_RE.search(content_html)
