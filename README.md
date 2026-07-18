@@ -1,99 +1,359 @@
-[# Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
+#!/usr/bin/env python3
+"""
+Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-This repo emails you the top posts across all of Reddit (r/all) on a
-schedule, automatically, using GitHub's free scheduled-workflow runners.
-Nothing needs to run on your own machine. You can blacklist subreddits you
-don't want included.
+Fetches the top posts from all of Reddit (r/all) via Reddit's public RSS
+feed and emails you a digest, grouped by subreddit, including each post's
+thumbnail image and full self-text body (for text posts). Subreddits in
+BLACKLIST_SUBREDDITS are filtered out before the email is built.
 
-## One-time setup (~5 minutes)
+COST OF INCLUDING IMAGES/BODY TEXT
+------------------------------------
+Getting a post's image and full body requires one extra request per post
+(Reddit's subreddit-level RSS only gives title + link, not the full body).
+With POSTS_TOTAL=50 that's up to 51 requests per run instead of 1, with a
+1-second gap between each - so a run now takes roughly a minute instead of
+a few seconds, and is more likely to hit Reddit's rate limiting (handled
+with retries, but not guaranteed to always succeed). If this becomes too
+flaky on your schedule, lowering POSTS_TOTAL or the run frequency helps.
 
-1. **Create a GitHub account** if you don't have one: https://github.com/join
+NOTE ON RELIABILITY
+--------------------
+As of 2026, Reddit has largely closed off new API/OAuth app registration for
+personal projects, and blocks a lot of unauthenticated traffic from cloud
+IPs (like GitHub Actions runners) with a 403. This script uses Reddit's
+public RSS feed instead, which historically have been more lenient - but
+there's no guarantee Reddit won't tighten this up too. Run the workflow
+manually once after setup (Actions tab -> "Run workflow") to confirm it
+still works before relying on the schedule.
 
-2. **Create a new repository**
-   - Click "+" (top right) -> "New repository"
-   - Name it anything, e.g. `reddit-top-post-emailer`
-   - Set it to **Private** (recommended, keeps your workflow config private)
-   - Click "Create repository"
+SETUP
+-----
+1. Install dependencies:
+     pip install requests
 
-3. **Upload these files** to the repo (drag-and-drop works fine via the GitHub
-   web UI: "Add file" -> "Upload files"), keeping the folder structure:
-   - `reddit_top_post_emailer.py`
-   - `requirements.txt`
-   - `.github/workflows/send-digest.yml`
+2. Create a Gmail "App Password" (regular Gmail passwords won't work with SMTP):
+     - Go to https://myaccount.google.com/apppasswords
+     - You need 2-Step Verification turned on first.
+     - Create an app password for "Mail" and copy the 16-character code.
 
-4. **Create a Gmail App Password** (your normal Gmail password won't work):
-   - Turn on 2-Step Verification: https://myaccount.google.com/signinoptions/two-step-verification
-   - Then create an app password: https://myaccount.google.com/apppasswords
-   - Choose "Mail" as the app, copy the 16-character password it gives you.
+3. Set these as environment variables:
+     export GMAIL_ADDRESS="youraddress@gmail.com"
+     export GMAIL_APP_PASSWORD="16-char-app-password"
+     export REDDIT_RECIPIENT="where-to-send@example.com"
+     export POSTS_TOTAL="50"                               # optional, top N posts from r/all
+     export TIMEFRAME="day"                                # optional: hour/day/week/month/year/all
+     export BLACKLIST_SUBREDDITS=""                         # optional, comma-separated, e.g. "nsfw,gonewild"
 
-5. **Add your secrets to the repo** (this keeps your email/password out of the code):
-   - In your repo: Settings -> Secrets and variables -> Actions -> "New repository secret"
-   - Add three secrets:
-     - `GMAIL_ADDRESS` = your Gmail address
-     - `GMAIL_APP_PASSWORD` = the 16-character app password from step 4
-     - `REDDIT_RECIPIENT` = the email address that should receive the digest
+SCHEDULING
+----------
+See README.md / GitHub Actions workflow in this repo for running this daily
+in the cloud without needing your own computer on.
 
-6. **Test it manually**
-   - Go to the "Actions" tab in your repo
-   - Click "Send Top Reddit Posts of the Day" on the left
-   - Click "Run workflow" -> "Run workflow" (green button)
-   - Wait ~10-20 seconds, refresh, click into the run to see logs / confirm success
-   - Check the recipient inbox for the email
+USAGE
+-----
+     python reddit_top_post_emailer.py
+"""
 
-That's it — from now on it runs automatically every day at the time set in
-`.github/workflows/send-digest.yml` (default 09:00 UTC), with no computer of
-yours needing to be on.
+import os
+import re
+import smtplib
+import ssl
+import sys
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from html import escape
 
-## Blacklisting subreddits
+import requests
 
-Edit the `BLACKLIST_SUBREDDITS` line in `.github/workflows/send-digest.yml`:
-```yaml
-BLACKLIST_SUBREDDITS: "nsfw,gonewild,AskReddit"
-```
-Comma-separated subreddit names (no `r/` prefix needed), case-insensitive.
-Any post from a blacklisted subreddit is dropped before the email is built.
-It starts empty — add subreddits to it any time.
+# Reddit's public RSS feed for r/all's top posts (Atom format).
+REDDIT_RSS_URL = "https://www.reddit.com/r/all/top/.rss"
 
-You can also adjust `POSTS_TOTAL` (how many top posts to pull from r/all
-before filtering — the blacklist is applied *after* this, so a small
-`POSTS_TOTAL` with a big blacklist might leave few posts) and `TIMEFRAME`
-(`hour`, `day`, `week`, `month`, `year`, `all`).
+ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
-## Changing the schedule
+# A browser-like User-Agent tends to fare better against Reddit's bot
+# detection than a generic/default one.
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/atom+xml, application/xml, text/xml, */*",
+}
 
-Open `.github/workflows/send-digest.yml` and edit this line:
-```
-- cron: "*/30 * * * *"
-```
-Cron format is `minute hour day month weekday`, always in **UTC**. Examples:
-- `*/30 * * * *` -> every 30 minutes (current setting)
-- `0 2 * * *` -> 2:00 AM UTC daily (9:00 AM in Vietnam, UTC+7)
-- `0 9 * * 1-5` -> 9:00 AM UTC, weekdays only
+POSTS_TOTAL = int(os.environ.get("POSTS_TOTAL", "50"))
+TIMEFRAME = os.environ.get("TIMEFRAME", "day")  # hour, day, week, month, year, all
+TIMEZONE = os.environ.get("TIMEZONE", "Asia/Ho_Chi_Minh")
+BLACKLIST_SUBREDDITS = {
+    s.strip().lower() for s in os.environ.get("BLACKLIST_SUBREDDITS", "").split(",") if s.strip()
+}
 
-A handy converter: https://crontab.guru (shows what a cron string means, but
-you still need to convert your local time to UTC yourself, e.g. via
-https://www.timeanddate.com/worldclock/converter.html)
+SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
+IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+TAG_STRIP_RE = re.compile(r'<[^>]+>')
+# Reddit wraps a post's rendered self-text between these two stable markers -
+# used across old and new Reddit for years, more reliable than trying to
+# parse the surrounding table layout.
+SELFTEXT_RE = re.compile(r'<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->', re.IGNORECASE | re.DOTALL)
 
-## A note on reliability
+MAX_BODY_CHARS = 600
 
-This fetches posts via Reddit's public RSS feeds rather than the official
-API, because as of 2026 Reddit has largely closed off new personal API app
-registration. RSS has historically been more lenient toward unauthenticated
-requests than the JSON scrape endpoint, but Reddit could tighten this up at
-any time without notice. If a run starts failing with 403s again, check the
-Actions tab logs first - there's currently no fully "official" workaround
-available for new personal projects.
 
-Also note: since this runs every 30 minutes with no de-duplication, you'll
-get repeat emails of the same top posts throughout the day. Let me know if
-you'd like a "don't re-send the same post" tracker added.
+def fetch_top_posts(limit=50, timeframe="day", retries=3):
+    """Fetch the top N posts from r/all's RSS feed for the given timeframe.
+    Retries with backoff on 429 (rate limited).
+    """
+    params = {"t": timeframe, "limit": limit}
 
-## Notes
+    last_error = None
+    for attempt in range(1, retries + 1):
+        resp = requests.get(REDDIT_RSS_URL, headers=HEADERS, params=params, timeout=15)
+        if resp.status_code == 429:
+            last_error = f"429 rate limited (attempt {attempt}/{retries})"
+            if attempt < retries:
+                time.sleep(5 * attempt)
+                continue
+            resp.raise_for_status()
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        break
+    else:
+        raise requests.RequestException(last_error)
 
-- GitHub Actions free tier includes 2,000 minutes/month for private repos —
-  this job takes well under a minute a day, so it's effectively free.
-- You can also trigger it manually anytime via the "Run workflow" button.
-- If the run fails, check the Actions tab -> the failed run -> logs. Common
-  causes: a secret is missing/misspelled, or the Gmail app password was
-  revoked.
-](https://github.com/tuongphantrue/interest-rate-emailer)
+    posts = []
+    for entry in root.findall("atom:entry", ATOM_NS)[:limit]:
+        title_el = entry.find("atom:title", ATOM_NS)
+        title = title_el.text if title_el is not None else "Untitled post"
+
+        link = None
+        for link_el in entry.findall("atom:link", ATOM_NS):
+            href = link_el.get("href")
+            if href:
+                link = href
+                break
+
+        author_el = entry.find("atom:author/atom:name", ATOM_NS)
+        author = author_el.text.lstrip("/u/") if author_el is not None and author_el.text else "unknown"
+
+        sub_match = SUBREDDIT_FROM_URL_RE.search(link or "")
+        subreddit = sub_match.group(1) if sub_match else "unknown"
+
+        posts.append({
+            "title": title,
+            "author": author,
+            "url": link,
+            "subreddit": subreddit,
+        })
+    return posts
+
+
+def fetch_post_detail(permalink, retries=3):
+    """Fetch a single post's own RSS feed (its comments page) to get its
+    thumbnail/preview image and full self-text body, if any. Returns
+    (image_url_or_None, body_text_or_empty_string). Link posts (no
+    self-text) will return an empty body - that's expected, not a failure.
+    """
+    if not permalink:
+        return None, ""
+
+    url = permalink.rstrip("/") + "/.rss"
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 429:
+            last_error = f"429 rate limited (attempt {attempt}/{retries})"
+            if attempt < retries:
+                time.sleep(3 * attempt)
+                continue
+            return None, ""
+        if resp.status_code >= 400:
+            return None, ""
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError:
+            return None, ""
+        break
+    else:
+        return None, ""
+
+    first_entry = root.find("atom:entry", ATOM_NS)
+    if first_entry is None:
+        return None, ""
+
+    content_el = first_entry.find("atom:content", ATOM_NS)
+    content_html = content_el.text if content_el is not None and content_el.text else ""
+
+    img_match = IMG_TAG_RE.search(content_html)
+    image_url = img_match.group(1) if img_match else None
+
+    body_text = ""
+    selftext_match = SELFTEXT_RE.search(content_html)
+    if selftext_match:
+        raw = selftext_match.group(1)
+        plain = TAG_STRIP_RE.sub(" ", raw)
+        plain = " ".join(plain.split())  # collapse whitespace
+        if plain:
+            body_text = plain[:MAX_BODY_CHARS] + ("..." if len(plain) > MAX_BODY_CHARS else "")
+
+    return image_url, body_text
+
+
+def enrich_posts(posts):
+    """Fetch image + body text for each post individually. This means one
+    extra request per post (on top of the single r/all listing request), so
+    it's slower and more rate-limit-prone than the listing fetch alone.
+    """
+    for i, p in enumerate(posts):
+        if i > 0:
+            time.sleep(1)
+        try:
+            image_url, body_text = fetch_post_detail(p["url"])
+        except requests.RequestException as e:
+            print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
+            image_url, body_text = None, ""
+        p["image"] = image_url
+        p["body"] = body_text
+    return posts
+    """Group posts by subreddit, dropping any post whose subreddit is
+    blacklisted (case-insensitive). Preserves the order subreddits first
+    appear in (i.e. roughly by top post rank).
+    """
+    sections = {}
+    skipped = 0
+    for p in posts:
+        if p["subreddit"].lower() in blacklist:
+            skipped += 1
+            continue
+        sections.setdefault(p["subreddit"], []).append(p)
+    if skipped:
+        print(f"  Filtered out {skipped} post(s) from blacklisted subreddit(s)")
+    return sections
+
+
+def build_section_html(subreddit, posts):
+    rows = []
+    for i, p in enumerate(posts, start=1):
+        title_esc = escape(p["title"])
+
+        image_html = ""
+        if p.get("image"):
+            image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
+
+        body_html = ""
+        if p.get("body"):
+            body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
+
+        rows.append(f"""
+<tr>
+  <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
+    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
+    <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
+    {body_html}
+    {image_html}
+  </td>
+</tr>""")
+
+    return f"""
+<h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;">
+{''.join(rows)}
+</table>"""
+
+
+def build_html(sections):
+    body_parts = [build_section_html(sub, posts) for sub, posts in sections.items()]
+    total = sum(len(posts) for posts in sections.values())
+    return f"""\
+<html>
+<body style="margin:0; padding:20px; background:#f4f4f4;">
+  <h1 style="color:#222; font-family:Arial,Helvetica,sans-serif;">&#128293; {total} Top Reddit Posts Today</h1>
+  {''.join(body_parts)}
+  <p style="color:#999; font-size:12px; font-family:Arial,Helvetica,sans-serif; margin-top:20px;">
+    Sent automatically by reddit-top-post-emailer via GitHub Actions.
+  </p>
+</body>
+</html>"""
+
+
+def build_plain_text(sections):
+    lines = []
+    for sub, posts in sections.items():
+        lines.append(f"--- r/{sub} ---")
+        for p in posts:
+            lines.append(f"{p['title']} (u/{p['author']}) - {p['url']}")
+            if p.get("body"):
+                lines.append(f"  {p['body']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def send_email(subject, html, text):
+    sender = os.environ.get("GMAIL_ADDRESS")
+    app_password = os.environ.get("GMAIL_APP_PASSWORD")
+    recipient = os.environ.get("REDDIT_RECIPIENT")
+
+    missing = [name for name, val in [
+        ("GMAIL_ADDRESS", sender),
+        ("GMAIL_APP_PASSWORD", app_password),
+        ("REDDIT_RECIPIENT", recipient),
+    ] if not val]
+    if missing:
+        print(f"Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(sender, app_password)
+        server.send_message(msg)
+
+    print(f"Sent to {recipient}!")
+
+
+def main():
+    print(f"Fetching top {POSTS_TOTAL} posts from r/all (timeframe={TIMEFRAME})...")
+    if BLACKLIST_SUBREDDITS:
+        print(f"Blacklisted subreddits: {', '.join(sorted(BLACKLIST_SUBREDDITS))}")
+
+    try:
+        posts = fetch_top_posts(limit=POSTS_TOTAL, timeframe=TIMEFRAME)
+        print(f"  fetched {len(posts)} post(s)")
+    except (requests.RequestException, ET.ParseError) as e:
+        print(f"  failed to fetch - {e}", file=sys.stderr)
+        posts = []
+
+    sections = group_by_subreddit(posts, BLACKLIST_SUBREDDITS)
+
+    total = sum(len(v) for v in sections.values())
+    if total == 0:
+        print("No posts found - not sending an email.")
+        return
+
+    print(f"Fetching image + body text for {total} post(s) individually (1 request per post)...")
+    for sub in sections:
+        sections[sub] = enrich_posts(sections[sub])
+
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(TIMEZONE))
+    except Exception:
+        now = datetime.now()
+    timestamp = now.strftime("%b %d, %Y %I:%M %p")
+
+    subject = f"{total} top Reddit posts - {timestamp}"
+    html = build_html(sections)
+    text = build_plain_text(sections)
+
+    send_email(subject, html, text)
+
+
+if __name__ == "__main__":
+    main()
