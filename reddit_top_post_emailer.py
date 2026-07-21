@@ -2,39 +2,26 @@
 """
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-Fetches the top posts from all of Reddit (r/all) via Reddit's public RSS
-feed, then fetches each post's own RSS feed to get its thumbnail/preview
-image and full self-text body (for text posts) - and emails you a digest,
-grouped by subreddit. Subreddits in BLACKLIST_SUBREDDITS are filtered out
-before the email is built.
+Fetches the top posts from all of Reddit (r/all), then fetches each post's
+own JSON data to get its score (net upvotes), thumbnail/preview image, and
+full self-text body (for text posts) - and emails you a digest, grouped by
+subreddit. Subreddits in BLACKLIST_SUBREDDITS are filtered out before the
+email is built.
 
-NOTE ON SCORE/VOTES: An earlier version of this script tried to also
-include each post's score via Reddit's JSON endpoint, but that endpoint
-was confirmed blocked (403) from GitHub Actions IPs in testing - every
-post came back empty. So this version sticks to RSS only, which is
-confirmed to work for image + body. Score/upvotes aren't included as a
-result. Downvotes were never available either way - Reddit doesn't expose
-upvote/downvote counts separately to anyone, via any method, ever.
+WHY THIS VERSION USES A PROXY
+------------------------------
+Reddit blocks essentially all per-post requests from GitHub Actions' own
+IP range (confirmed via testing: 0/50 succeeded across multiple endpoint
+types). Routing requests through a residential proxy (PROXY_URL) avoids
+that block, since the traffic no longer originates from a flagged
+datacenter IP range. Without PROXY_URL set, this script still runs - it
+just falls back to direct requests, which reliably get the listing but
+will likely fail on per-post enrichment the same way as before.
 
-COST OF INCLUDING IMAGES/BODY TEXT
-------------------------------------
-Getting a post's image and full body requires one extra request per post
-(Reddit's subreddit-level RSS only gives title + link). With POSTS_TOTAL=50
-that's up to 51 requests per run instead of 1, with a 1-second gap between
-each - so a run now takes roughly a minute instead of a few seconds, and is
-more likely to hit Reddit's rate limiting (handled with retries, but not
-guaranteed to always succeed). If this becomes too flaky on your schedule,
-lowering POSTS_TOTAL or the run frequency helps.
-
-NOTE ON RELIABILITY
---------------------
-As of 2026, Reddit has largely closed off new API/OAuth app registration for
-personal projects, and blocks a lot of unauthenticated traffic from cloud
-IPs (like GitHub Actions runners) with a 403. This script uses Reddit's
-public RSS feed instead, which historically have been more lenient - but
-there's no guarantee Reddit won't tighten this up too. Run the workflow
-manually once after setup (Actions tab -> "Run workflow") to confirm it
-still works before relying on the schedule.
+NOTE ON VOTES: Reddit only ever exposes net score (upvotes minus
+downvotes) - it does not expose upvote and downvote counts separately, to
+anyone, via any method. That's a Reddit platform limitation, not something
+this script (or a proxy) can work around.
 
 SETUP
 -----
@@ -46,10 +33,16 @@ SETUP
      - You need 2-Step Verification turned on first.
      - Create an app password for "Mail" and copy the 16-character code.
 
-3. Set these as environment variables:
+3. Get a residential proxy provider's connection URL, in the form:
+     http://username:password@proxy-host:port
+   (Exact format varies by provider - check their docs. Most residential
+   proxy services support this standard format.)
+
+4. Set these as environment variables:
      export GMAIL_ADDRESS="youraddress@gmail.com"
      export GMAIL_APP_PASSWORD="16-char-app-password"
      export REDDIT_RECIPIENT="where-to-send@example.com"
+     export PROXY_URL="http://username:password@proxy-host:port"   # optional but needed for images/body/score
      export POSTS_TOTAL="50"                               # optional, top N posts from r/all
      export TIMEFRAME="day"                                # optional: hour/day/week/month/year/all
      export BLACKLIST_SUBREDDITS=""                         # optional, comma-separated, e.g. "nsfw,gonewild"
@@ -78,7 +71,8 @@ from html import escape
 
 import requests
 
-# Reddit's public RSS feed for r/all's top posts (Atom format).
+# Reddit's public RSS feed for r/all's top posts (Atom format) - used for
+# the listing only, since it's confirmed reliable even without a proxy.
 REDDIT_RSS_URL = "https://www.reddit.com/r/all/top/.rss"
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
@@ -98,30 +92,15 @@ BLACKLIST_SUBREDDITS = {
     s.strip().lower() for s in os.environ.get("BLACKLIST_SUBREDDITS", "").split(",") if s.strip()
 }
 
+# Residential proxy URL, e.g. "http://user:pass@host:port". Used only for
+# the per-post detail requests (score/image/body), since those are the
+# ones that get blocked without it. Optional - if unset, falls back to
+# direct requests (listing still works, per-post enrichment likely won't).
+PROXY_URL = os.environ.get("PROXY_URL", "").strip()
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
-IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-TAG_STRIP_RE = re.compile(r'<[^>]+>')
-# Reddit wraps a post's rendered self-text between these two stable markers -
-# used across old and new Reddit for years, more reliable than trying to
-# parse the surrounding table layout.
-SELFTEXT_RE = re.compile(r'<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->', re.IGNORECASE | re.DOTALL)
-
 MAX_BODY_CHARS = 600
-
-# Domains that host actual post images/thumbnails, as opposed to static UI
-# assets (subreddit icons, snoo avatars, etc.) that can also show up as
-# <img> tags in a post's RSS content but aren't the post's own image.
-IMAGE_CONTENT_DOMAINS = (
-    "i.redd.it", "preview.redd.it", "external-preview.redd.it",
-    "i.imgur.com", "imgur.com", "a.thumbs.redditmedia.com",
-    "b.thumbs.redditmedia.com", "external-i.redd.it",
-)
-
-
-def is_real_post_image(url):
-    if not url:
-        return False
-    return any(domain in url.lower() for domain in IMAGE_CONTENT_DOMAINS)
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
@@ -173,91 +152,89 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
 
 
 def fetch_post_detail(permalink):
-    """Fetch a single post's own RSS feed (its comments page) to get its
-    thumbnail/preview image and full self-text body, if any. Returns
-    (image_url_or_None, body_text_or_empty_string). Link posts (no
-    self-text) will return an empty body - that's expected, not a failure.
-
-    Uses RSS rather than JSON: JSON was tried and confirmed blocked (403)
-    from GitHub Actions IPs, while this RSS endpoint is confirmed to work
-    (at least some of the time - see note on rate limiting below).
-
-    No retry-on-429 here (there used to be one): testing showed retries
-    just burned ~9 extra seconds per blocked post without actually
-    improving the success rate, since the block wasn't transient within a
-    single run. Failing fast keeps a 50-post run to ~1 minute instead of
-    ~8 minutes for the same end result.
+    """Fetch a single post's own JSON data (via proxy, if configured) to
+    get its score, thumbnail/preview image, and full self-text body.
+    Returns {"score": int_or_None, "image": url_or_None, "body": text_or_""}.
+    No retry-on-429: if the proxy itself gets rate limited, retrying a
+    single request rarely helps and just adds runtime - better to move on.
     """
+    empty = {"score": None, "image": None, "body": ""}
     if not permalink:
-        return None, ""
+        return empty
 
-    url = permalink.rstrip("/") + "/.rss"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    url = permalink.rstrip("/") + ".json"
+    resp = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=20)
     if resp.status_code >= 400:
-        return None, ""
+        return empty
     try:
-        root = ET.fromstring(resp.content)
-    except ET.ParseError:
-        return None, ""
+        data = resp.json()
+        post_data = data[0]["data"]["children"][0]["data"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return empty
 
-    first_entry = root.find("atom:entry", ATOM_NS)
-    if first_entry is None:
-        return None, ""
-
-    content_el = first_entry.find("atom:content", ATOM_NS)
-    content_html = content_el.text if content_el is not None and content_el.text else ""
-
-    img_matches = IMG_TAG_RE.findall(content_html)
-    image_url = next((u for u in img_matches if is_real_post_image(u)), None)
+    score = post_data.get("score")
 
     body_text = ""
-    selftext_match = SELFTEXT_RE.search(content_html)
-    if selftext_match:
-        raw = selftext_match.group(1)
-        plain = TAG_STRIP_RE.sub(" ", raw)
-        plain = " ".join(plain.split())  # collapse whitespace
-        if plain:
-            body_text = plain[:MAX_BODY_CHARS] + ("..." if len(plain) > MAX_BODY_CHARS else "")
+    selftext = (post_data.get("selftext") or "").strip()
+    if selftext:
+        body_text = selftext[:MAX_BODY_CHARS] + ("..." if len(selftext) > MAX_BODY_CHARS else "")
 
-    return image_url, body_text
+    image_url = None
+    try:
+        preview_images = post_data.get("preview", {}).get("images", [])
+        if preview_images:
+            image_url = preview_images[0]["source"]["url"].replace("&amp;", "&")
+    except (KeyError, IndexError, TypeError):
+        image_url = None
+    if not image_url:
+        thumb = post_data.get("thumbnail", "")
+        if thumb and thumb.startswith("http"):
+            image_url = thumb
+
+    return {"score": score, "image": image_url, "body": body_text}
 
 
 def enrich_posts(posts):
-    """Fetch image + body text for each post individually. This means one
-    extra request per post (on top of the single r/all listing request), so
-    it's slower and more rate-limit-prone than the listing fetch alone. If
-    several requests in a row come back completely empty, stop trying
-    further ones - that's a sign of IP-level blocking rather than a
-    per-post issue, so retrying each remaining post would just waste time.
+    """Fetch score + image + body text for each post individually via the
+    proxy. If several requests in a row come back completely empty, stop
+    trying further ones - a sign the proxy itself is being blocked or
+    misconfigured, so retrying each remaining post would just waste time.
     """
+    if not PROXIES:
+        print("  PROXY_URL not set - skipping image/body/score enrichment (would likely be blocked anyway).")
+        for p in posts:
+            p["score"], p["image"], p["body"] = None, None, ""
+        return posts
+
     consecutive_blocked = 0
     got_content = 0
     for i, p in enumerate(posts):
         if i > 0:
-            time.sleep(2)
+            time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["image"], p["body"] = None, ""
+            p["score"], p["image"], p["body"] = None, None, ""
             continue
 
         try:
-            image_url, body_text = fetch_post_detail(p["url"])
+            detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            image_url, body_text = None, ""
+            detail = {"score": None, "image": None, "body": ""}
 
-        if image_url is None and not body_text:
+        if detail["score"] is None and detail["image"] is None and not detail["body"]:
             consecutive_blocked += 1
         else:
             consecutive_blocked = 0
             got_content += 1
 
-        p["image"] = image_url
-        p["body"] = body_text
+        p["score"] = detail["score"]
+        p["image"] = detail["image"]
+        p["body"] = detail["body"]
 
-    print(f"  Got image/body for {got_content}/{len(posts)} post(s)")
+    print(f"  Got score/image/body for {got_content}/{len(posts)} post(s)")
     if consecutive_blocked >= 5:
-        print("  Per-post detail fetching appears blocked - stopped early to save time.", file=sys.stderr)
+        print("  Per-post detail fetching appears blocked even through the proxy - stopped early.", file=sys.stderr)
     return posts
 
 
@@ -283,6 +260,10 @@ def build_section_html(subreddit, posts):
     for i, p in enumerate(posts, start=1):
         title_esc = escape(p["title"])
 
+        score_html = ""
+        if p.get("score") is not None:
+            score_html = f"&#11014; {p['score']:,} &nbsp;|&nbsp; "
+
         image_html = ""
         if p.get("image"):
             image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
@@ -295,7 +276,7 @@ def build_section_html(subreddit, posts):
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
     <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
-    <div style="font-size:12px; color:#888; margin-top:4px;">u/{escape(p['author'])}</div>
+    <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
   </td>
@@ -328,7 +309,8 @@ def build_plain_text(sections):
     for sub, posts in sections.items():
         lines.append(f"--- r/{sub} ---")
         for p in posts:
-            lines.append(f"{p['title']} (u/{p['author']}) - {p['url']}")
+            score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
+            lines.append(f"{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
         lines.append("")
@@ -368,6 +350,7 @@ def main():
     print(f"Fetching top {POSTS_TOTAL} posts from r/all (timeframe={TIMEFRAME})...")
     if BLACKLIST_SUBREDDITS:
         print(f"Blacklisted subreddits: {', '.join(sorted(BLACKLIST_SUBREDDITS))}")
+    print(f"Proxy configured: {'yes' if PROXIES else 'no'}")
 
     try:
         posts = fetch_top_posts(limit=POSTS_TOTAL, timeframe=TIMEFRAME)
@@ -383,7 +366,7 @@ def main():
         print("No posts found - not sending an email.")
         return
 
-    print(f"Fetching image + body text for {total} post(s) individually (1 request per post)...")
+    print(f"Fetching score/image/body text for {total} post(s) individually...")
     for sub in sections:
         sections[sub] = enrich_posts(sections[sub])
 
