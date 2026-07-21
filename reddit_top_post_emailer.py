@@ -106,8 +106,19 @@ BLACKLIST_SUBREDDITS = {
     s.strip().lower() for s in os.environ.get("BLACKLIST_SUBREDDITS", "").split(",") if s.strip()
 }
 
+# Bump this string whenever the file changes, and check it in the Actions
+# log after deploying - the single most reliable way to confirm a push
+# actually took effect, since checking the file on GitHub's website has
+# repeatedly shown stale/cached content in this project's history.
+SCRIPT_VERSION = "2026-07-crosspost-fix-video-off"
+
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
+
+# Video links are hidden for now while focusing on getting image display
+# right - the underlying fetch/extraction still runs, this just skips
+# rendering it. Flip to True to show "Watch video" links again.
+SHOW_VIDEO_LINKS = False
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
@@ -318,7 +329,7 @@ def build_section_html(subreddit, posts):
             image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
 
         video_html = ""
-        if p.get("video"):
+        if p.get("video") and SHOW_VIDEO_LINKS:
             video_html = (
                 f'<div style="margin-top:6px;">'
                 f'<a href="{escape(p["video"])}" style="font-size:12px; color:#0066cc; text-decoration:none;">'
@@ -371,7 +382,7 @@ def build_plain_text(sections):
             lines.append(f"{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
-            if p.get("video"):
+            if p.get("video") and SHOW_VIDEO_LINKS:
                 lines.append(f"  Video: {p['video']}")
         lines.append("")
     return "\n".join(lines)
@@ -407,6 +418,7 @@ def send_email(subject, html, text):
 
 
 def main():
+    print(f"=== Script version: {SCRIPT_VERSION} ===")
     print(f"Fetching top {POSTS_TOTAL} posts from r/all (timeframe={TIMEFRAME})...")
     if BLACKLIST_SUBREDDITS:
         print(f"Blacklisted subreddits: {', '.join(sorted(BLACKLIST_SUBREDDITS))}")
