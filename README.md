@@ -26,18 +26,27 @@ don't want included.
    - Then create an app password: https://myaccount.google.com/apppasswords
    - Choose "Mail" as the app, copy the 16-character password it gives you.
 
-5. **Add your secrets to the repo** (this keeps your email/password out of the code):
+5. **Get your Reddit session cookie** (this is what unlocks score/image/
+   body - skip this step if you're fine with title/author/link only):
+   - Log into reddit.com in your browser
+   - Open DevTools (F12) -> Network tab -> reload the page
+   - Click the first "reddit.com" request in the list
+   - In the Headers panel, find "Cookie:" under Request Headers
+   - Copy the ENTIRE value (a long string of name=value pairs)
+   - **Only ever paste this into the GitHub secret in the next step -
+     never into a file that gets committed, even in a private repo.**
+     It's a real login credential for your Reddit account.
+
+6. **Add your secrets to the repo** (this keeps your email/password/cookie out of the code):
    - In your repo: Settings -> Secrets and variables -> Actions -> "New repository secret"
-   - Add four secrets:
+   - Add these secrets:
      - `GMAIL_ADDRESS` = your Gmail address
      - `GMAIL_APP_PASSWORD` = the 16-character app password from step 4
      - `REDDIT_RECIPIENT` = the email address that should receive the digest
-     - `PROXY_URL` = your residential proxy connection URL, in the form
-       `http://username:password@proxy-host:port` (from your proxy
-       provider). This is what unblocks per-post score/image/body -
-       without it, the digest still works but is title/author/link only.
+     - `REDDIT_COOKIE` = the cookie string from step 5 (optional - omit
+       this one if you skipped step 5)
 
-6. **Test it manually**
+7. **Test it manually**
    - Go to the "Actions" tab in your repo
    - Click "Send Top Reddit Posts of the Day" on the left
    - Click "Run workflow" -> "Run workflow" (green button)
@@ -96,16 +105,19 @@ stops returning results, switching `REDDIT_RSS_URL` in the script to
 similar) is the fallback.
 
 Score, images, and full body text require one extra request per post on
-top of the listing request - up to 51 requests per run at the default
-`POSTS_TOTAL=50`. Testing confirmed Reddit blocks essentially all of these
-per-post requests when they come directly from GitHub Actions' IP range
-(0/50 succeeded without a proxy). Setting `PROXY_URL` routes just these
-per-post requests through a residential proxy instead, which avoids that
-block. Without `PROXY_URL` set, the script still runs fine - it just skips
-enrichment and sends title/author/link only, same as the fallback. If
-enrichment is still failing with a proxy configured, check the run logs
-for the `Got score/image/body for X/50` line - if that's still 0, the
-proxy itself may be misconfigured, out of quota, or also getting blocked.
+top of the listing request, and testing confirmed Reddit blocks
+essentially all of these per-post requests when they look anonymous
+(0/50 succeeded without authentication). Setting `REDDIT_COOKIE` attaches
+your logged-in Reddit session to those requests instead, which may get
+past that block since it looks like a real user rather than a bot. This
+isn't officially sanctioned by Reddit's API terms, and the cookie will
+expire periodically (needing a fresh copy from your browser when it
+does). Without `REDDIT_COOKIE` set, the script still runs fine - it just
+skips enrichment and sends title/author/link only. If enrichment is still
+failing with a cookie configured, check the run logs for the
+`Got score/image/body for X/50` line - if that's still 0, the cookie may
+be expired, or Reddit may be blocking even authenticated requests from
+this IP range.
 
 Also note: since this runs every 30 minutes with no de-duplication, you'll
 get repeat emails of the same top posts throughout the day. Let me know if
