@@ -2,26 +2,33 @@
 """
 Reddit Top Posts of the Day -> Email (runs on GitHub Actions, no local computer needed)
 
-Fetches the top posts from all of Reddit (r/all), then fetches each post's
-own JSON data to get its score (net upvotes), thumbnail/preview image, and
-full self-text body (for text posts) - and emails you a digest, grouped by
+Fetches the top posts from all of Reddit (r/all), then (if REDDIT_COOKIE is
+set) fetches each post's own JSON data to get its score, thumbnail/preview
+image, and full self-text body - and emails you a digest, grouped by
 subreddit. Subreddits in BLACKLIST_SUBREDDITS are filtered out before the
 email is built.
 
-WHY THIS VERSION USES A PROXY
-------------------------------
+WHY THIS VERSION USES A COOKIE
+---------------------------------
 Reddit blocks essentially all per-post requests from GitHub Actions' own
-IP range (confirmed via testing: 0/50 succeeded across multiple endpoint
-types). Routing requests through a residential proxy (PROXY_URL) avoids
-that block, since the traffic no longer originates from a flagged
-datacenter IP range. Without PROXY_URL set, this script still runs - it
-just falls back to direct requests, which reliably get the listing but
-will likely fail on per-post enrichment the same way as before.
+IP range when they look anonymous (confirmed: 0/50 succeeded in testing).
+Attaching a logged-in Reddit account's session cookie makes requests look
+like a real logged-in user instead of an anonymous bot, which may get past
+that block. Without REDDIT_COOKIE set, this script still runs fine - it
+just skips score/image/body and sends title/author/link only.
+
+IMPORTANT SECURITY NOTE: REDDIT_COOKIE is a real login credential for a
+real Reddit account, not an API key. Store it ONLY as a GitHub Actions
+secret (Settings -> Secrets and variables -> Actions) - never paste it
+directly into this file or any committed file, even in a private repo.
+Using a personal account's cookie for automated access is also outside
+Reddit's official API terms - low real-world risk for light personal use,
+but worth knowing this isn't officially sanctioned. Cookies also expire
+periodically and will need to be refreshed when that happens.
 
 NOTE ON VOTES: Reddit only ever exposes net score (upvotes minus
 downvotes) - it does not expose upvote and downvote counts separately, to
-anyone, via any method. That's a Reddit platform limitation, not something
-this script (or a proxy) can work around.
+anyone, via any method, even to a logged-in account viewing its own feed.
 
 SETUP
 -----
@@ -33,16 +40,18 @@ SETUP
      - You need 2-Step Verification turned on first.
      - Create an app password for "Mail" and copy the 16-character code.
 
-3. Get a residential proxy provider's connection URL, in the form:
-     http://username:password@proxy-host:port
-   (Exact format varies by provider - check their docs. Most residential
-   proxy services support this standard format.)
+3. Get your Reddit session cookie:
+     - Log into reddit.com in your browser
+     - Open DevTools (F12) -> Network tab -> reload the page
+     - Click the first "reddit.com" request in the list
+     - In the Headers panel, find "Cookie:" under Request Headers
+     - Copy the ENTIRE value (a long string of name=value pairs)
 
-4. Set these as environment variables:
+4. Set these as environment variables (or GitHub Actions secrets):
      export GMAIL_ADDRESS="youraddress@gmail.com"
      export GMAIL_APP_PASSWORD="16-char-app-password"
      export REDDIT_RECIPIENT="where-to-send@example.com"
-     export PROXY_URL="http://username:password@proxy-host:port"   # optional but needed for images/body/score
+     export REDDIT_COOKIE="the cookie string from step 3"   # optional but needed for score/image/body
      export POSTS_TOTAL="50"                               # optional, top N posts from r/all
      export TIMEFRAME="day"                                # optional: hour/day/week/month/year/all
      export BLACKLIST_SUBREDDITS=""                         # optional, comma-separated, e.g. "nsfw,gonewild"
@@ -72,18 +81,23 @@ from html import escape
 import requests
 
 # Reddit's public RSS feed for r/all's top posts (Atom format) - used for
-# the listing only, since it's confirmed reliable even without a proxy.
+# the listing only, since it's confirmed reliable even without a cookie.
 REDDIT_RSS_URL = "https://www.reddit.com/r/all/top/.rss"
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
+REDDIT_COOKIE = os.environ.get("REDDIT_COOKIE", "").strip()
+
 # A browser-like User-Agent tends to fare better against Reddit's bot
-# detection than a generic/default one.
+# detection than a generic/default one. The Cookie header (if set) is what
+# makes per-post requests look like a real logged-in user.
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "application/atom+xml, application/xml, text/xml, */*",
 }
+if REDDIT_COOKIE:
+    HEADERS["Cookie"] = REDDIT_COOKIE
 
 POSTS_TOTAL = int(os.environ.get("POSTS_TOTAL", "50"))
 TIMEFRAME = os.environ.get("TIMEFRAME", "day")  # hour, day, week, month, year, all
@@ -91,13 +105,6 @@ TIMEZONE = os.environ.get("TIMEZONE", "Asia/Ho_Chi_Minh")
 BLACKLIST_SUBREDDITS = {
     s.strip().lower() for s in os.environ.get("BLACKLIST_SUBREDDITS", "").split(",") if s.strip()
 }
-
-# Residential proxy URL, e.g. "http://user:pass@host:port". Used only for
-# the per-post detail requests (score/image/body), since those are the
-# ones that get blocked without it. Optional - if unset, falls back to
-# direct requests (listing still works, per-post enrichment likely won't).
-PROXY_URL = os.environ.get("PROXY_URL", "").strip()
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -152,18 +159,18 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
 
 
 def fetch_post_detail(permalink):
-    """Fetch a single post's own JSON data (via proxy, if configured) to
-    get its score, thumbnail/preview image, and full self-text body.
-    Returns {"score": int_or_None, "image": url_or_None, "body": text_or_""}.
-    No retry-on-429: if the proxy itself gets rate limited, retrying a
-    single request rarely helps and just adds runtime - better to move on.
+    """Fetch a single post's own JSON data (with the login cookie attached,
+    if configured) to get its score, thumbnail/preview image, and full
+    self-text body. Returns {"score": int_or_None, "image": url_or_None,
+    "body": text_or_""}. No retry-on-429: a single retry rarely helps and
+    just adds runtime - better to move on to the next post.
     """
     empty = {"score": None, "image": None, "body": ""}
     if not permalink:
         return empty
 
     url = permalink.rstrip("/") + ".json"
-    resp = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=20)
+    resp = requests.get(url, headers=HEADERS, timeout=20)
     if resp.status_code >= 400:
         return empty
     try:
@@ -195,13 +202,14 @@ def fetch_post_detail(permalink):
 
 
 def enrich_posts(posts):
-    """Fetch score + image + body text for each post individually via the
-    proxy. If several requests in a row come back completely empty, stop
-    trying further ones - a sign the proxy itself is being blocked or
-    misconfigured, so retrying each remaining post would just waste time.
+    """Fetch score + image + body text for each post individually, using
+    the login cookie. If several requests in a row come back completely
+    empty, stop trying further ones - a sign the cookie isn't working (e.g.
+    expired) or is still being blocked, so retrying each remaining post
+    would just waste time.
     """
-    if not PROXIES:
-        print("  PROXY_URL not set - skipping image/body/score enrichment (would likely be blocked anyway).")
+    if not REDDIT_COOKIE:
+        print("  REDDIT_COOKIE not set - skipping image/body/score enrichment (would likely be blocked anyway).")
         for p in posts:
             p["score"], p["image"], p["body"] = None, None, ""
         return posts
@@ -234,7 +242,8 @@ def enrich_posts(posts):
 
     print(f"  Got score/image/body for {got_content}/{len(posts)} post(s)")
     if consecutive_blocked >= 5:
-        print("  Per-post detail fetching appears blocked even through the proxy - stopped early.", file=sys.stderr)
+        print("  Per-post detail fetching appears blocked even with the cookie - stopped early. "
+              "The cookie may have expired - try grabbing a fresh one from your browser.", file=sys.stderr)
     return posts
 
 
@@ -350,7 +359,7 @@ def main():
     print(f"Fetching top {POSTS_TOTAL} posts from r/all (timeframe={TIMEFRAME})...")
     if BLACKLIST_SUBREDDITS:
         print(f"Blacklisted subreddits: {', '.join(sorted(BLACKLIST_SUBREDDITS))}")
-    print(f"Proxy configured: {'yes' if PROXIES else 'no'}")
+    print(f"Cookie configured: {'yes' if REDDIT_COOKIE else 'no'}")
 
     try:
         posts = fetch_top_posts(limit=POSTS_TOTAL, timeframe=TIMEFRAME)
