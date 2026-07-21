@@ -162,10 +162,18 @@ def fetch_post_detail(permalink):
     """Fetch a single post's own JSON data (with the login cookie attached,
     if configured) to get its score, thumbnail/preview image, and full
     self-text body. Returns {"score": int_or_None, "image": url_or_None,
-    "body": text_or_""}. No retry-on-429: a single retry rarely helps and
-    just adds runtime - better to move on to the next post.
+    "video": url_or_None, "body": text_or_""}. No retry-on-429: a single
+    retry rarely helps and just adds runtime - better to move on to the
+    next post.
+
+    NOTE ON VIDEO: email clients (Gmail, Outlook, etc.) don't support
+    playing video inline - there's no email-safe way to embed a playable
+    player. So "video" here is a direct link to the video file (Reddit's
+    own fallback_url, video-only with no audio track - that's how Reddit
+    serves it) rather than an embedded player. Clicking it opens/downloads
+    the raw video.
     """
-    empty = {"score": None, "image": None, "body": ""}
+    empty = {"score": None, "image": None, "video": None, "body": ""}
     if not permalink:
         return empty
 
@@ -186,6 +194,13 @@ def fetch_post_detail(permalink):
     if selftext:
         body_text = selftext[:MAX_BODY_CHARS] + ("..." if len(selftext) > MAX_BODY_CHARS else "")
 
+    video_url = None
+    try:
+        if post_data.get("is_video"):
+            video_url = post_data["media"]["reddit_video"]["fallback_url"].replace("&amp;", "&")
+    except (KeyError, TypeError):
+        video_url = None
+
     image_url = None
     try:
         preview_images = post_data.get("preview", {}).get("images", [])
@@ -198,20 +213,20 @@ def fetch_post_detail(permalink):
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
-    return {"score": score, "image": image_url, "body": body_text}
+    return {"score": score, "image": image_url, "video": video_url, "body": body_text}
 
 
 def enrich_posts(posts):
-    """Fetch score + image + body text for each post individually, using
-    the login cookie. If several requests in a row come back completely
-    empty, stop trying further ones - a sign the cookie isn't working (e.g.
-    expired) or is still being blocked, so retrying each remaining post
-    would just waste time.
+    """Fetch score + image + video + body text for each post individually,
+    using the login cookie. If several requests in a row come back
+    completely empty, stop trying further ones - a sign the cookie isn't
+    working (e.g. expired) or is still being blocked, so retrying each
+    remaining post would just waste time.
     """
     if not REDDIT_COOKIE:
-        print("  REDDIT_COOKIE not set - skipping image/body/score enrichment (would likely be blocked anyway).")
+        print("  REDDIT_COOKIE not set - skipping image/video/body/score enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["score"], p["image"], p["body"] = None, None, ""
+            p["score"], p["image"], p["video"], p["body"] = None, None, None, ""
         return posts
 
     consecutive_blocked = 0
@@ -221,16 +236,16 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["score"], p["image"], p["body"] = None, None, ""
+            p["score"], p["image"], p["video"], p["body"] = None, None, None, ""
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"score": None, "image": None, "body": ""}
+            detail = {"score": None, "image": None, "video": None, "body": ""}
 
-        if detail["score"] is None and detail["image"] is None and not detail["body"]:
+        if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
         else:
             consecutive_blocked = 0
@@ -238,9 +253,10 @@ def enrich_posts(posts):
 
         p["score"] = detail["score"]
         p["image"] = detail["image"]
+        p["video"] = detail["video"]
         p["body"] = detail["body"]
 
-    print(f"  Got score/image/body for {got_content}/{len(posts)} post(s)")
+    print(f"  Got score/image/video/body for {got_content}/{len(posts)} post(s)")
     if consecutive_blocked >= 5:
         print("  Per-post detail fetching appears blocked even with the cookie - stopped early. "
               "The cookie may have expired - try grabbing a fresh one from your browser.", file=sys.stderr)
@@ -277,6 +293,14 @@ def build_section_html(subreddit, posts):
         if p.get("image"):
             image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
 
+        video_html = ""
+        if p.get("video"):
+            video_html = (
+                f'<div style="margin-top:6px;">'
+                f'<a href="{escape(p["video"])}" style="font-size:12px; color:#0066cc; text-decoration:none;">'
+                f'&#9654; Watch video (no audio - Reddit strips it from this link)</a></div>'
+            )
+
         body_html = ""
         if p.get("body"):
             body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
@@ -288,6 +312,7 @@ def build_section_html(subreddit, posts):
     <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
+    {video_html}
   </td>
 </tr>""")
 
@@ -322,6 +347,8 @@ def build_plain_text(sections):
             lines.append(f"{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
+            if p.get("video"):
+                lines.append(f"  Video: {p['video']}")
         lines.append("")
     return "\n".join(lines)
 
