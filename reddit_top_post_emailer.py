@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-crosspost-fix-video-off"
+SCRIPT_VERSION = "2026-07-smaller-images"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -326,7 +326,11 @@ def build_section_html(subreddit, posts):
 
         image_html = ""
         if p.get("image"):
-            image_html = f'<img src="{escape(p["image"])}" style="max-width:100%; border-radius:6px; margin-top:8px;">'
+            image_html = (
+                f'<img src="{escape(p["image"])}" '
+                f'style="max-width:280px; max-height:280px; width:auto; height:auto; '
+                f'border-radius:6px; margin-top:8px; display:block;">'
+            )
 
         video_html = ""
         if p.get("video") and SHOW_VIDEO_LINKS:
