@@ -28,10 +28,14 @@ don't want included.
 
 5. **Add your secrets to the repo** (this keeps your email/password out of the code):
    - In your repo: Settings -> Secrets and variables -> Actions -> "New repository secret"
-   - Add three secrets:
+   - Add four secrets:
      - `GMAIL_ADDRESS` = your Gmail address
      - `GMAIL_APP_PASSWORD` = the 16-character app password from step 4
      - `REDDIT_RECIPIENT` = the email address that should receive the digest
+     - `PROXY_URL` = your residential proxy connection URL, in the form
+       `http://username:password@proxy-host:port` (from your proxy
+       provider). This is what unblocks per-post score/image/body -
+       without it, the digest still works but is title/author/link only.
 
 6. **Test it manually**
    - Go to the "Actions" tab in your repo
@@ -91,12 +95,17 @@ stops returning results, switching `REDDIT_RSS_URL` in the script to
 `https://www.reddit.com/r/popular/top/.rss` (NSFW-filtered, otherwise
 similar) is the fallback.
 
-Including each post's image and full body text means one extra request per
-post on top of the listing request - up to 51 requests per run at the
-default `POSTS_TOTAL=50`. This is slower (~1 minute per run) and more
-likely to hit rate limiting than just the title/link listing was. Retries
-with backoff are built in, but if runs still fail out, try lowering
-`POSTS_TOTAL` or spacing the schedule out.
+Score, images, and full body text require one extra request per post on
+top of the listing request - up to 51 requests per run at the default
+`POSTS_TOTAL=50`. Testing confirmed Reddit blocks essentially all of these
+per-post requests when they come directly from GitHub Actions' IP range
+(0/50 succeeded without a proxy). Setting `PROXY_URL` routes just these
+per-post requests through a residential proxy instead, which avoids that
+block. Without `PROXY_URL` set, the script still runs fine - it just skips
+enrichment and sends title/author/link only, same as the fallback. If
+enrichment is still failing with a proxy configured, check the run logs
+for the `Got score/image/body for X/50` line - if that's still 0, the
+proxy itself may be misconfigured, out of quota, or also getting blocked.
 
 Also note: since this runs every 30 minutes with no de-duplication, you'll
 get repeat emails of the same top posts throughout the day. Let me know if
