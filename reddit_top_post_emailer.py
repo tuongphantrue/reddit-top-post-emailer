@@ -172,6 +172,12 @@ def fetch_post_detail(permalink):
     own fallback_url, video-only with no audio track - that's how Reddit
     serves it) rather than an embedded player. Clicking it opens/downloads
     the raw video.
+
+    NOTE ON CROSSPOSTS/GALLERIES: a crosspost (a repost of another post)
+    doesn't carry its own media - it's fetched from the original post via
+    crosspost_parent_list. A gallery post (multiple images) stores images
+    under media_metadata rather than preview.images - only the first image
+    is shown here as a representative thumbnail, not the full gallery.
     """
     empty = {"score": None, "image": None, "video": None, "body": ""}
     if not permalink:
@@ -194,22 +200,40 @@ def fetch_post_detail(permalink):
     if selftext:
         body_text = selftext[:MAX_BODY_CHARS] + ("..." if len(selftext) > MAX_BODY_CHARS else "")
 
+    # Crossposts (a repost of another post) don't carry their own media -
+    # the actual image/video lives on the original post, nested under
+    # crosspost_parent_list. Look there instead when present.
+    crosspost_parents = post_data.get("crosspost_parent_list") or []
+    media_source = crosspost_parents[0] if crosspost_parents else post_data
+
     video_url = None
     try:
-        if post_data.get("is_video"):
-            video_url = post_data["media"]["reddit_video"]["fallback_url"].replace("&amp;", "&")
+        if media_source.get("is_video"):
+            video_url = media_source["media"]["reddit_video"]["fallback_url"].replace("&amp;", "&")
     except (KeyError, TypeError):
         video_url = None
 
     image_url = None
     try:
-        preview_images = post_data.get("preview", {}).get("images", [])
+        preview_images = media_source.get("preview", {}).get("images", [])
         if preview_images:
             image_url = preview_images[0]["source"]["url"].replace("&amp;", "&")
     except (KeyError, IndexError, TypeError):
         image_url = None
+
+    # Gallery posts (multiple images) store images under media_metadata
+    # rather than preview.images - grab the first one as a representative
+    # image rather than showing nothing.
+    if not image_url and media_source.get("is_gallery"):
+        try:
+            gallery_items = media_source["gallery_data"]["items"]
+            first_media_id = gallery_items[0]["media_id"]
+            image_url = media_source["media_metadata"][first_media_id]["s"]["u"].replace("&amp;", "&")
+        except (KeyError, IndexError, TypeError):
+            image_url = None
+
     if not image_url:
-        thumb = post_data.get("thumbnail", "")
+        thumb = media_source.get("thumbnail", "")
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
