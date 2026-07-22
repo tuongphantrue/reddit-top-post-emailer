@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-smaller-images"
+SCRIPT_VERSION = "2026-07-post-type-badge"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -169,13 +169,44 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
     return posts
 
 
+def classify_post_type(post_data):
+    """Classify a post as Text/Gallery/Video/Image/Link based on Reddit's
+    own post metadata (post_hint, is_self, is_gallery, is_video, domain).
+    Best-effort heuristic, not from any single authoritative field, since
+    Reddit doesn't expose one clean "type" field for every post shape.
+    """
+    if post_data.get("is_self"):
+        return "Text"
+    if post_data.get("is_gallery"):
+        return "Gallery"
+    if post_data.get("is_video"):
+        return "Video"
+
+    hint = post_data.get("post_hint", "")
+    if hint == "image":
+        return "Image"
+    if hint in ("hosted:video", "rich:video"):
+        return "Video"
+    if hint == "link":
+        return "Link"
+
+    domain = post_data.get("domain", "") or ""
+    if domain in ("i.redd.it", "i.imgur.com", "imgur.com"):
+        return "Image"
+    if domain == "v.redd.it":
+        return "Video"
+    if domain.startswith("self."):
+        return "Text"
+    return "Link"
+
+
 def fetch_post_detail(permalink):
     """Fetch a single post's own JSON data (with the login cookie attached,
-    if configured) to get its score, thumbnail/preview image, and full
-    self-text body. Returns {"score": int_or_None, "image": url_or_None,
-    "video": url_or_None, "body": text_or_""}. No retry-on-429: a single
-    retry rarely helps and just adds runtime - better to move on to the
-    next post.
+    if configured) to get its post type, score, thumbnail/preview image,
+    and full self-text body. Returns {"type": str_or_None,
+    "score": int_or_None, "image": url_or_None, "video": url_or_None,
+    "body": text_or_""}. No retry-on-429: a single retry rarely helps and
+    just adds runtime - better to move on to the next post.
 
     NOTE ON VIDEO: email clients (Gmail, Outlook, etc.) don't support
     playing video inline - there's no email-safe way to embed a playable
@@ -190,7 +221,7 @@ def fetch_post_detail(permalink):
     under media_metadata rather than preview.images - only the first image
     is shown here as a representative thumbnail, not the full gallery.
     """
-    empty = {"score": None, "image": None, "video": None, "body": ""}
+    empty = {"type": None, "score": None, "image": None, "video": None, "body": ""}
     if not permalink:
         return empty
 
@@ -204,6 +235,7 @@ def fetch_post_detail(permalink):
     except (ValueError, KeyError, IndexError, TypeError):
         return empty
 
+    post_type = classify_post_type(post_data)
     score = post_data.get("score")
 
     body_text = ""
@@ -248,7 +280,7 @@ def fetch_post_detail(permalink):
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
-    return {"score": score, "image": image_url, "video": video_url, "body": body_text}
+    return {"type": post_type, "score": score, "image": image_url, "video": video_url, "body": body_text}
 
 
 def enrich_posts(posts):
@@ -259,9 +291,9 @@ def enrich_posts(posts):
     remaining post would just waste time.
     """
     if not REDDIT_COOKIE:
-        print("  REDDIT_COOKIE not set - skipping image/video/body/score enrichment (would likely be blocked anyway).")
+        print("  REDDIT_COOKIE not set - skipping type/image/video/body/score enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["score"], p["image"], p["video"], p["body"] = None, None, None, ""
+            p["type"], p["score"], p["image"], p["video"], p["body"] = None, None, None, None, ""
         return posts
 
     consecutive_blocked = 0
@@ -271,14 +303,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["score"], p["image"], p["video"], p["body"] = None, None, None, ""
+            p["type"], p["score"], p["image"], p["video"], p["body"] = None, None, None, None, ""
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"score": None, "image": None, "video": None, "body": ""}
+            detail = {"type": None, "score": None, "image": None, "video": None, "body": ""}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -286,6 +318,7 @@ def enrich_posts(posts):
             consecutive_blocked = 0
             got_content += 1
 
+        p["type"] = detail["type"]
         p["score"] = detail["score"]
         p["image"] = detail["image"]
         p["video"] = detail["video"]
@@ -344,10 +377,23 @@ def build_section_html(subreddit, posts):
         if p.get("body"):
             body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
 
+        type_html = ""
+        if p.get("type"):
+            type_colors = {
+                "Image": "#0066cc", "Video": "#8b5cf6", "Text": "#6b7280",
+                "Gallery": "#059669", "Link": "#ea580c",
+            }
+            color = type_colors.get(p["type"], "#6b7280")
+            type_html = (
+                f'<span style="font-size:10px; font-weight:600; color:{color}; '
+                f'border:1px solid {color}; border-radius:3px; padding:1px 5px; '
+                f'margin-left:6px; vertical-align:middle;">{escape(p["type"]).upper()}</span>'
+            )
+
         rows.append(f"""
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
-    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>
+    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>{type_html}
     <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
@@ -383,7 +429,8 @@ def build_plain_text(sections):
         lines.append(f"--- r/{sub} ---")
         for p in posts:
             score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
-            lines.append(f"{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
+            type_part = f"[{p['type']}] " if p.get("type") else ""
+            lines.append(f"{type_part}{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
             if p.get("video") and SHOW_VIDEO_LINKS:
