@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-two-column-layout"
+SCRIPT_VERSION = "2026-07-gif-preview"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -248,11 +248,14 @@ def fetch_post_detail(permalink):
     the next post.
 
     NOTE ON VIDEO: email clients (Gmail, Outlook, etc.) don't support
-    playing video inline - there's no email-safe way to embed a playable
-    player. So "video" here is a direct link to the video file (Reddit's
-    own fallback_url, video-only with no audio track - that's how Reddit
-    serves it) rather than an embedded player. Clicking it opens/downloads
-    the raw video.
+    playing video inline - no client executes a <video> tag in a message
+    body, for security reasons universal across providers, not something
+    fixable from this project's side. As the closest available substitute,
+    video posts use Reddit's own animated GIF preview (if available) as
+    the "image" shown, since GIFs DO autoplay inline in email - this gives
+    real motion, just no audio (GIF format never carries sound). "video"
+    is still also returned as a direct link to the raw video file, for
+    anyone who wants the real thing.
 
     NOTE ON CROSSPOSTS/GALLERIES: a crosspost (a repost of another post)
     doesn't carry its own media - it's fetched from the original post via
@@ -303,13 +306,24 @@ def fetch_post_detail(permalink):
     except (KeyError, TypeError):
         video_url = None
 
+    # For video posts, prefer an animated GIF preview over a static
+    # thumbnail - GIFs actually autoplay inline in email (video tags
+    # don't), so this is the closest thing to "playable video" achievable
+    # in an email body. No audio though - GIF format never carries sound.
     image_url = None
-    try:
-        preview_images = media_source.get("preview", {}).get("images", [])
-        if preview_images:
-            image_url = preview_images[0]["source"]["url"].replace("&amp;", "&")
-    except (KeyError, IndexError, TypeError):
-        image_url = None
+    if video_url:
+        try:
+            image_url = media_source["preview"]["images"][0]["variants"]["gif"]["source"]["url"].replace("&amp;", "&")
+        except (KeyError, IndexError, TypeError):
+            image_url = None
+
+    if not image_url:
+        try:
+            preview_images = media_source.get("preview", {}).get("images", [])
+            if preview_images:
+                image_url = preview_images[0]["source"]["url"].replace("&amp;", "&")
+        except (KeyError, IndexError, TypeError):
+            image_url = None
 
     # Gallery posts (multiple images) store images under media_metadata
     # rather than preview.images - grab the first one as a representative
