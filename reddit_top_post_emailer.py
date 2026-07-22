@@ -110,11 +110,14 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-comments-and-subject"
+SCRIPT_VERSION = "2026-07-mobile-domain-hot"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
 MAX_COMMENT_CHARS = 300
+
+# Posts scoring at or above this get a "HOT" badge alongside their type badge.
+HOT_SCORE_THRESHOLD = 50000
 
 # Video links are hidden for now while focusing on getting image display
 # right - the underlying fetch/extraction still runs, this just skips
@@ -267,7 +270,7 @@ def fetch_post_detail(permalink):
     Reddit's post JSON response includes both the post (data[0]) and its
     comment tree (data[1]) in one call, so this adds no extra requests.
     """
-    empty = {"type": None, "score": None, "comments": None, "image": None, "video": None, "body": "", "top_comment": None}
+    empty = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comment": None}
     if not permalink:
         return empty
 
@@ -288,6 +291,7 @@ def fetch_post_detail(permalink):
     post_type = classify_post_type(post_data)
     score = post_data.get("score")
     comments = post_data.get("num_comments")
+    domain = post_data.get("domain") if post_type == "Link" else None
 
     body_text = ""
     selftext = (post_data.get("selftext") or "").strip()
@@ -342,8 +346,8 @@ def fetch_post_detail(permalink):
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
-    return {"type": post_type, "score": score, "comments": comments, "image": image_url, "video": video_url,
-            "body": body_text, "top_comment": top_comment}
+    return {"type": post_type, "score": score, "comments": comments, "domain": domain, "image": image_url,
+            "video": video_url, "body": body_text, "top_comment": top_comment}
 
 
 def enrich_posts(posts):
@@ -356,7 +360,7 @@ def enrich_posts(posts):
     if not REDDIT_COOKIE:
         print("  REDDIT_COOKIE not set - skipping type/image/video/body/score/comment enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["type"], p["score"], p["comments"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, None, "", None
         return posts
 
     consecutive_blocked = 0
@@ -366,14 +370,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["type"], p["score"], p["comments"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, None, "", None
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"type": None, "score": None, "comments": None, "image": None, "video": None, "body": "", "top_comment": None}
+            detail = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comment": None}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -384,6 +388,7 @@ def enrich_posts(posts):
         p["type"] = detail["type"]
         p["score"] = detail["score"]
         p["comments"] = detail["comments"]
+        p["domain"] = detail["domain"]
         p["image"] = detail["image"]
         p["video"] = detail["video"]
         p["top_comment"] = detail["top_comment"]
@@ -430,7 +435,7 @@ def build_section_html(subreddit, posts):
         if p.get("image"):
             image_html = (
                 f'<img src="{escape(p["image"])}" '
-                f'style="max-width:280px; max-height:280px; width:auto; height:auto; '
+                f'style="width:100%; max-width:280px; height:auto; '
                 f'border-radius:6px; margin-top:8px; display:block;">'
             )
 
@@ -463,16 +468,27 @@ def build_section_html(subreddit, posts):
                 "Gallery": "#059669", "Link": "#ea580c",
             }
             color = type_colors.get(p["type"], "#6b7280")
+            type_label = p["type"].upper()
+            if p["type"] == "Link" and p.get("domain"):
+                type_label = f'{type_label} \u2192 {p["domain"]}'
             type_html = (
                 f'<span style="font-size:10px; font-weight:600; color:{color}; '
                 f'border:1px solid {color}; border-radius:3px; padding:1px 5px; '
-                f'margin-left:6px; vertical-align:middle;">{escape(p["type"]).upper()}</span>'
+                f'margin-left:6px; vertical-align:middle;">{escape(type_label)}</span>'
+            )
+
+        hot_html = ""
+        if p.get("score") is not None and p["score"] >= HOT_SCORE_THRESHOLD:
+            hot_html = (
+                '<span style="font-size:10px; font-weight:700; color:#fff; '
+                'background:#dc2626; border-radius:3px; padding:1px 5px; '
+                'margin-left:4px; vertical-align:middle;">&#128293; HOT</span>'
             )
 
         rows.append(f"""
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
-    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>{type_html}
+    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>{type_html}{hot_html}
     <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
@@ -503,14 +519,27 @@ def build_html(sections):
 
     return f"""\
 <html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  @media only screen and (max-width: 600px) {{
+    .digest-col {{
+      display: block !important;
+      width: 100% !important;
+      padding-left: 0 !important;
+      padding-right: 0 !important;
+    }}
+  }}
+</style>
+</head>
 <body style="margin:0; padding:20px; background:#f4f4f4;">
   <h1 style="color:#222; font-family:Arial,Helvetica,sans-serif;">&#128293; {total} Top Reddit Posts Today</h1>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;">
     <tr>
-      <td valign="top" width="50%" style="padding-right:16px;">
+      <td class="digest-col" valign="top" width="50%" style="padding-right:16px;">
         {''.join(left_parts)}
       </td>
-      <td valign="top" width="50%" style="padding-left:16px;">
+      <td class="digest-col" valign="top" width="50%" style="padding-left:16px;">
         {''.join(right_parts)}
       </td>
     </tr>
@@ -616,12 +645,6 @@ def main():
     timestamp = now.strftime("%b %d, %Y %I:%M %p")
 
     subject = f"{total} top Reddit posts - {timestamp}"
-    top_post_title = next(
-        (p["title"] for p in posts if p["subreddit"].lower() not in BLACKLIST_SUBREDDITS), None
-    )
-    if top_post_title:
-        truncated = top_post_title[:70] + ("..." if len(top_post_title) > 70 else "")
-        subject = f'{truncated} (+{total - 1} more) - {timestamp}'
 
     html = build_html(sections)
     text = build_plain_text(sections)
