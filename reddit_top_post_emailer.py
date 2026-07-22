@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-gif-preview"
+SCRIPT_VERSION = "2026-07-comments-and-subject"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -267,7 +267,7 @@ def fetch_post_detail(permalink):
     Reddit's post JSON response includes both the post (data[0]) and its
     comment tree (data[1]) in one call, so this adds no extra requests.
     """
-    empty = {"type": None, "score": None, "image": None, "video": None, "body": "", "top_comment": None}
+    empty = {"type": None, "score": None, "comments": None, "image": None, "video": None, "body": "", "top_comment": None}
     if not permalink:
         return empty
 
@@ -287,6 +287,7 @@ def fetch_post_detail(permalink):
 
     post_type = classify_post_type(post_data)
     score = post_data.get("score")
+    comments = post_data.get("num_comments")
 
     body_text = ""
     selftext = (post_data.get("selftext") or "").strip()
@@ -341,7 +342,7 @@ def fetch_post_detail(permalink):
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
-    return {"type": post_type, "score": score, "image": image_url, "video": video_url,
+    return {"type": post_type, "score": score, "comments": comments, "image": image_url, "video": video_url,
             "body": body_text, "top_comment": top_comment}
 
 
@@ -355,7 +356,7 @@ def enrich_posts(posts):
     if not REDDIT_COOKIE:
         print("  REDDIT_COOKIE not set - skipping type/image/video/body/score/comment enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["type"], p["score"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, "", None
         return posts
 
     consecutive_blocked = 0
@@ -365,14 +366,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["type"], p["score"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, "", None
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"type": None, "score": None, "image": None, "video": None, "body": "", "top_comment": None}
+            detail = {"type": None, "score": None, "comments": None, "image": None, "video": None, "body": "", "top_comment": None}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -382,6 +383,7 @@ def enrich_posts(posts):
 
         p["type"] = detail["type"]
         p["score"] = detail["score"]
+        p["comments"] = detail["comments"]
         p["image"] = detail["image"]
         p["video"] = detail["video"]
         p["top_comment"] = detail["top_comment"]
@@ -419,6 +421,10 @@ def build_section_html(subreddit, posts):
         score_html = ""
         if p.get("score") is not None:
             score_html = f"&#11014; {p['score']:,} &nbsp;|&nbsp; "
+
+        comments_html = ""
+        if p.get("comments") is not None:
+            comments_html = f"&#128172; {p['comments']:,} &nbsp;|&nbsp; "
 
         image_html = ""
         if p.get("image"):
@@ -467,7 +473,7 @@ def build_section_html(subreddit, posts):
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
     <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>{type_html}
-    <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}u/{escape(p['author'])}</div>
+    <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
     {body_html}
     {image_html}
     {video_html}
@@ -522,8 +528,9 @@ def build_plain_text(sections):
         lines.append(f"--- r/{sub} ---")
         for p in posts:
             score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
+            comments_part = f"[{p['comments']:,} comments] " if p.get("comments") is not None else ""
             type_part = f"[{p['type']}] " if p.get("type") else ""
-            lines.append(f"{type_part}{score_part}{p['title']} (u/{p['author']}) - {p['url']}")
+            lines.append(f"{type_part}{score_part}{comments_part}{p['title']} (u/{p['author']}) - {p['url']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
             if p.get("video") and SHOW_VIDEO_LINKS:
@@ -585,7 +592,7 @@ def main():
         print("No posts found - not sending an email.")
         return
 
-    print(f"Fetching score/image/body text for {total} post(s) individually...")
+    print(f"Fetching score/comments/image/body text for {total} post(s) individually...")
     for sub in sections:
         sections[sub] = enrich_posts(sections[sub])
 
@@ -609,6 +616,13 @@ def main():
     timestamp = now.strftime("%b %d, %Y %I:%M %p")
 
     subject = f"{total} top Reddit posts - {timestamp}"
+    top_post_title = next(
+        (p["title"] for p in posts if p["subreddit"].lower() not in BLACKLIST_SUBREDDITS), None
+    )
+    if top_post_title:
+        truncated = top_post_title[:70] + ("..." if len(top_post_title) > 70 else "")
+        subject = f'{truncated} (+{total - 1} more) - {timestamp}'
+
     html = build_html(sections)
     text = build_plain_text(sections)
 
