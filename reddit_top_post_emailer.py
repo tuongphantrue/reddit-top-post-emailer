@@ -110,10 +110,11 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-post-type-badge"
+SCRIPT_VERSION = "2026-07-top-comment"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
+MAX_COMMENT_CHARS = 300
 
 # Video links are hidden for now while focusing on getting image display
 # right - the underlying fetch/extraction still runs, this just skips
@@ -200,13 +201,51 @@ def classify_post_type(post_data):
     return "Link"
 
 
+def extract_top_comment(comment_listing):
+    """Pick the highest-scored real top-level comment from a post's comment
+    listing (the second element of Reddit's post JSON response). Skips
+    deleted/removed comments, stickied mod-note comments, and AutoModerator
+    - none of those represent genuine community reaction. Returns
+    {"author": str, "body": str, "score": int} or None if nothing usable.
+    """
+    try:
+        children = comment_listing["data"]["children"]
+    except (KeyError, TypeError):
+        return None
+
+    best = None
+    for child in children:
+        if child.get("kind") != "t1":  # skip "more comments" stubs etc.
+            continue
+        d = child.get("data", {})
+        if d.get("stickied"):
+            continue
+        author = d.get("author")
+        body = (d.get("body") or "").strip()
+        if not body or body in ("[deleted]", "[removed]"):
+            continue
+        if author in (None, "[deleted]", "AutoModerator"):
+            continue
+
+        score = d.get("score", 0) or 0
+        if best is None or score > best["score"]:
+            best = {"author": author, "body": body, "score": score}
+
+    if best is None:
+        return None
+    if len(best["body"]) > MAX_COMMENT_CHARS:
+        best["body"] = best["body"][:MAX_COMMENT_CHARS] + "..."
+    return best
+
+
 def fetch_post_detail(permalink):
     """Fetch a single post's own JSON data (with the login cookie attached,
     if configured) to get its post type, score, thumbnail/preview image,
-    and full self-text body. Returns {"type": str_or_None,
+    full self-text body, and top comment. Returns {"type": str_or_None,
     "score": int_or_None, "image": url_or_None, "video": url_or_None,
-    "body": text_or_""}. No retry-on-429: a single retry rarely helps and
-    just adds runtime - better to move on to the next post.
+    "body": text_or_"", "top_comment": dict_or_None}. No retry-on-429: a
+    single retry rarely helps and just adds runtime - better to move on to
+    the next post.
 
     NOTE ON VIDEO: email clients (Gmail, Outlook, etc.) don't support
     playing video inline - there's no email-safe way to embed a playable
@@ -220,13 +259,17 @@ def fetch_post_detail(permalink):
     crosspost_parent_list. A gallery post (multiple images) stores images
     under media_metadata rather than preview.images - only the first image
     is shown here as a representative thumbnail, not the full gallery.
+
+    NOTE ON TOP COMMENT: comes from the SAME request as the post itself -
+    Reddit's post JSON response includes both the post (data[0]) and its
+    comment tree (data[1]) in one call, so this adds no extra requests.
     """
-    empty = {"type": None, "score": None, "image": None, "video": None, "body": ""}
+    empty = {"type": None, "score": None, "image": None, "video": None, "body": "", "top_comment": None}
     if not permalink:
         return empty
 
     url = permalink.rstrip("/") + ".json"
-    resp = requests.get(url, headers=HEADERS, timeout=20)
+    resp = requests.get(url, headers=HEADERS, params={"sort": "top"}, timeout=20)
     if resp.status_code >= 400:
         return empty
     try:
@@ -234,6 +277,10 @@ def fetch_post_detail(permalink):
         post_data = data[0]["data"]["children"][0]["data"]
     except (ValueError, KeyError, IndexError, TypeError):
         return empty
+
+    top_comment = None
+    if len(data) > 1:
+        top_comment = extract_top_comment(data[1])
 
     post_type = classify_post_type(post_data)
     score = post_data.get("score")
@@ -280,7 +327,8 @@ def fetch_post_detail(permalink):
         if thumb and thumb.startswith("http"):
             image_url = thumb
 
-    return {"type": post_type, "score": score, "image": image_url, "video": video_url, "body": body_text}
+    return {"type": post_type, "score": score, "image": image_url, "video": video_url,
+            "body": body_text, "top_comment": top_comment}
 
 
 def enrich_posts(posts):
@@ -291,9 +339,9 @@ def enrich_posts(posts):
     remaining post would just waste time.
     """
     if not REDDIT_COOKIE:
-        print("  REDDIT_COOKIE not set - skipping type/image/video/body/score enrichment (would likely be blocked anyway).")
+        print("  REDDIT_COOKIE not set - skipping type/image/video/body/score/comment enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["type"], p["score"], p["image"], p["video"], p["body"] = None, None, None, None, ""
+            p["type"], p["score"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, "", None
         return posts
 
     consecutive_blocked = 0
@@ -303,14 +351,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["type"], p["score"], p["image"], p["video"], p["body"] = None, None, None, None, ""
+            p["type"], p["score"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, "", None
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"type": None, "score": None, "image": None, "video": None, "body": ""}
+            detail = {"type": None, "score": None, "image": None, "video": None, "body": "", "top_comment": None}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -322,6 +370,7 @@ def enrich_posts(posts):
         p["score"] = detail["score"]
         p["image"] = detail["image"]
         p["video"] = detail["video"]
+        p["top_comment"] = detail["top_comment"]
         p["body"] = detail["body"]
 
     print(f"  Got score/image/video/body for {got_content}/{len(posts)} post(s)")
@@ -377,6 +426,16 @@ def build_section_html(subreddit, posts):
         if p.get("body"):
             body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
 
+        comment_html = ""
+        tc = p.get("top_comment")
+        if tc:
+            comment_html = (
+                f'<div style="font-size:12px; color:#555; margin-top:8px; padding-left:10px; '
+                f'border-left:3px solid #ddd; line-height:1.4;">'
+                f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}: {escape(tc["body"])}'
+                f'</div>'
+            )
+
         type_html = ""
         if p.get("type"):
             type_colors = {
@@ -398,6 +457,7 @@ def build_section_html(subreddit, posts):
     {body_html}
     {image_html}
     {video_html}
+    {comment_html}
   </td>
 </tr>""")
 
@@ -435,6 +495,9 @@ def build_plain_text(sections):
                 lines.append(f"  {p['body']}")
             if p.get("video") and SHOW_VIDEO_LINKS:
                 lines.append(f"  Video: {p['video']}")
+            if p.get("top_comment"):
+                tc = p["top_comment"]
+                lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {tc['body']}")
         lines.append("")
     return "\n".join(lines)
 
@@ -492,6 +555,18 @@ def main():
     print(f"Fetching score/image/body text for {total} post(s) individually...")
     for sub in sections:
         sections[sub] = enrich_posts(sections[sub])
+
+    all_posts = [p for posts in sections.values() for p in posts]
+    image_typed = [p for p in all_posts if p.get("type") in ("Image", "Gallery")]
+    image_typed_with_image = [p for p in image_typed if p.get("image")]
+    print(f"Image-hit-rate check: {len(image_typed_with_image)}/{len(image_typed)} "
+          f"posts tagged Image/Gallery actually got an image URL")
+    if image_typed and not image_typed_with_image:
+        print("  ALL Image/Gallery posts failed image extraction - likely a bug in the extraction "
+              "logic itself, not a per-post fluke.", file=sys.stderr)
+    elif len(image_typed_with_image) < len(image_typed):
+        missed_titles = [p["title"][:50] for p in image_typed if not p.get("image")]
+        print(f"  Missed: {missed_titles}", file=sys.stderr)
 
     try:
         from zoneinfo import ZoneInfo
