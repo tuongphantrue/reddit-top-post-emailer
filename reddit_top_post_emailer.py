@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-top-comment"
+SCRIPT_VERSION = "2026-07-two-column-layout"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -463,19 +463,38 @@ def build_section_html(subreddit, posts):
 
     return f"""
 <h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 {''.join(rows)}
 </table>"""
 
 
 def build_html(sections):
-    body_parts = [build_section_html(sub, posts) for sub, posts in sections.items()]
     total = sum(len(posts) for posts in sections.values())
+
+    # Two-column layout needs an HTML table (not flexbox/grid - those
+    # aren't reliably supported across email clients, especially Outlook).
+    # Subreddits alternate between columns to keep them roughly balanced;
+    # this doesn't perfectly balance by post COUNT per subreddit, but is a
+    # simple, good-enough split for a list like this.
+    left_parts, right_parts = [], []
+    for i, (sub, posts) in enumerate(sections.items()):
+        target = left_parts if i % 2 == 0 else right_parts
+        target.append(build_section_html(sub, posts))
+
     return f"""\
 <html>
 <body style="margin:0; padding:20px; background:#f4f4f4;">
   <h1 style="color:#222; font-family:Arial,Helvetica,sans-serif;">&#128293; {total} Top Reddit Posts Today</h1>
-  {''.join(body_parts)}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;">
+    <tr>
+      <td valign="top" width="50%" style="padding-right:16px;">
+        {''.join(left_parts)}
+      </td>
+      <td valign="top" width="50%" style="padding-left:16px;">
+        {''.join(right_parts)}
+      </td>
+    </tr>
+  </table>
   <p style="color:#999; font-size:12px; font-family:Arial,Helvetica,sans-serif; margin-top:20px;">
     Sent automatically by reddit-top-post-emailer via GitHub Actions.
   </p>
