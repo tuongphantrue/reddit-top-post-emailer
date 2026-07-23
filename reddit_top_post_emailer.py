@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-fold-abandoned"
+SCRIPT_VERSION = "2026-07-target-fold-experiment"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -510,6 +510,12 @@ def group_by_category(sections):
     return {cat: subs for cat, subs in by_category.items() if subs}
 
 
+def _safe_html_id(text):
+    """Sanitize a string into a value safe to use as an HTML id/href
+    fragment (letters, digits, underscore, hyphen only)."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '', text) or "x"
+
+
 def build_section_html(subreddit, posts):
     rows = []
     for i, p in enumerate(posts, start=1):
@@ -589,11 +595,19 @@ def build_section_html(subreddit, posts):
   </td>
 </tr>""")
 
+    fold_id = _safe_html_id(subreddit)
     return f"""
-<h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<div id="close-{fold_id}"></div>
+<div style="margin-bottom:2px;">
+  <span style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:19px; font-weight:bold;">r/{escape(subreddit)}</span>
+  <a href="#close-{fold_id}" style="font-size:11px; color:#0066cc; margin-left:8px; font-family:Arial,Helvetica,sans-serif;">[collapse]</a>
+  <a href="#top" style="font-size:11px; color:#0066cc; margin-left:4px; font-family:Arial,Helvetica,sans-serif;">[expand]</a>
+</div>
+<div id="content-{fold_id}">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 {''.join(rows)}
-</table>"""
+  </table>
+</div>"""
 
 
 def build_category_html(category, subreddit_posts):
@@ -625,11 +639,28 @@ def build_html(sections):
         target = left_parts if i % 2 == 0 else right_parts
         target.append(build_category_html(category, subreddit_posts))
 
+    # Collapsible sections via the CSS :target pseudo-class - pure HTML+CSS,
+    # no <input>/<form> elements at all (those are what email clients
+    # strip; plain <a href="#..."> links are core, always-preserved email
+    # functionality, so this has better odds than the checkbox-hack tried
+    # previously, which used a hidden <input> and was confirmed not to
+    # work). Each subreddit gets its OWN id-scoped rule - sharing one
+    # class across sections would make the general sibling selector (~)
+    # match every LATER section too, not just its own, so this generates
+    # one precise rule per subreddit instead.
+    all_subreddits = [sub for subs in by_category.values() for sub in subs]
+    fold_css = "\n  ".join(
+        f"#close-{_safe_html_id(sub)}:target ~ #content-{_safe_html_id(sub)} {{ display: none !important; }}"
+        for sub in all_subreddits
+    )
+
     return f"""\
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
+  {fold_css}
+
   @media only screen and (max-width: 600px) {{
     .digest-col {{
       display: block !important;
@@ -641,6 +672,7 @@ def build_html(sections):
 </style>
 </head>
 <body style="margin:0; padding:20px; background:#f4f4f4;">
+  <div id="top"></div>
   <h1 style="color:#222; font-family:Arial,Helvetica,sans-serif;">&#128293; {total} Top Reddit Posts Today</h1>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;">
     <tr>
