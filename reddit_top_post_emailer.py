@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-checkbox-fold-experiment"
+SCRIPT_VERSION = "2026-07-fold-abandoned"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -510,12 +510,6 @@ def group_by_category(sections):
     return {cat: subs for cat, subs in by_category.items() if subs}
 
 
-def _safe_html_id(text):
-    """Sanitize a string into a value safe to use as an HTML id/for
-    attribute (letters, digits, underscore, hyphen only)."""
-    return re.sub(r'[^a-zA-Z0-9_-]', '', text) or "x"
-
-
 def build_section_html(subreddit, posts):
     rows = []
     for i, p in enumerate(posts, start=1):
@@ -595,18 +589,11 @@ def build_section_html(subreddit, posts):
   </td>
 </tr>""")
 
-    fold_id = f"fold-{_safe_html_id(subreddit)}"
     return f"""
-<div style="margin-bottom:6px;">
-  <input type="checkbox" id="{fold_id}" class="foldcheck" style="display:none;">
-  <label for="{fold_id}" style="cursor:pointer; display:inline-block; background:#fff3ec; border:1px solid #ff4500; border-radius:4px; padding:4px 10px;">
-    <span style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:19px; font-weight:bold;">&#9660; r/{escape(subreddit)}</span>
-    <span style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:11px; font-weight:normal;"> (tap to collapse)</span>
-  </label>
-  <table class="foldcontent" role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 {''.join(rows)}
-  </table>
-</div>"""
+</table>"""
 
 
 def build_category_html(category, subreddit_posts):
@@ -643,16 +630,6 @@ def build_html(sections):
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-  /* "Checkbox hack" for collapsible sections - pure CSS, no JavaScript
-     and no HTML5 <details> semantics (that was tried and confirmed not
-     to work in at least one real Gmail rendering). This works via a
-     hidden checkbox + a label that toggles it + this sibling selector
-     hiding the following table when checked. Untested against Gmail as
-     of writing - genuinely experimental, not guaranteed either. */
-  input.foldcheck:checked ~ table.foldcontent {{
-    display: none !important;
-  }}
-
   @media only screen and (max-width: 600px) {{
     .digest-col {{
       display: block !important;
