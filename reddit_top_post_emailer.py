@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-mobile-domain-hot"
+SCRIPT_VERSION = "2026-07-topic-grouping"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -123,6 +123,86 @@ HOT_SCORE_THRESHOLD = 50000
 # right - the underlying fetch/extraction still runs, this just skips
 # rendering it. Flip to True to show "Watch video" links again.
 SHOW_VIDEO_LINKS = False
+
+# Reddit doesn't expose a topic/genre field for subreddits - this is a
+# best-effort static mapping of commonly-seen subreddits into rough topic
+# groups, maintained by hand. It will inevitably miss less-common
+# subreddits (those fall into "Other"), and a subreddit could arguably fit
+# more than one category - this is a convenience grouping, not an
+# authoritative classification.
+SUBREDDIT_CATEGORIES = {
+    "Wholesome": {
+        "mademesmile", "wholesome", "humansbeingbros", "upliftingnews",
+        "aww", "rarepuppers", "wholesomememes", "mademecry", "eyebleach",
+        "animalsbeingbros", "animalsbeingderps",
+    },
+    "Funny & Memes": {
+        "funny", "memes", "meirl", "me_irl", "unexpected", "murderedbywords",
+        "nottheonion", "wellthatsucks", "tiktokcringe", "comedycemetery",
+        "dankmemes", "shitposting", "196", "programmerhumor", "onerangebraincell",
+        "oneorangebraincell", "facepalm", "therewasanattempt", "cursedcomments",
+    },
+    "Interesting & Curious": {
+        "interestingasfuck", "damnthatsinteresting", "beamazed",
+        "oddlysatisfying", "historicalcapsule", "sipstea", "poirstea",
+        "interesting", "todayilearned", "educationalgifs", "nextlevel",
+        "mildlyinteresting",
+    },
+    "News & Politics": {
+        "news", "worldnews", "politics", "politicalhumor", "moderatepolitics",
+        "geopolitics", "upliftingnews",
+    },
+    "Tech & Science": {
+        "technology", "programming", "python", "science", "askscience",
+        "space", "futurology", "artificial", "machinelearning",
+        "explainlikeimfive", "gadgets", "dataisbeautiful",
+    },
+    "Gaming": {
+        "gaming", "pcgaming", "ps5", "xbox", "nintendoswitch",
+        "leagueoflegends", "globaloffensive", "wow", "minecraft", "steam",
+    },
+    "Sports": {
+        "sports", "nba", "nfl", "soccer", "formula1", "baseball", "hockey",
+        "mma", "football",
+    },
+    "Pics & Videos": {
+        "pics", "videos", "gifs", "publicfreakout", "mildlyinfuriating",
+        "crazyfuckingvideos", "wtf", "damnthatsatisfying",
+    },
+    "Advice & Discussion": {
+        "careeradvice", "relationship_advice", "askreddit", "confession",
+        "offmychest", "dating_advice", "amitheasshole", "relationships",
+        "trueoffmychest", "legaladvice",
+    },
+    "Finance": {
+        "investing", "stocks", "cryptocurrency", "wallstreetbets",
+        "personalfinance", "stockmarket",
+    },
+    "Food": {
+        "food", "cooking", "foodporn", "recipes", "mealprepsunday",
+    },
+    "Nature & Earth": {
+        "earthporn", "natureisfuckinglit", "natureismetal",
+    },
+}
+
+CATEGORY_ORDER = [
+    "Wholesome", "Funny & Memes", "Interesting & Curious", "Pics & Videos",
+    "News & Politics", "Tech & Science", "Gaming", "Sports", "Finance",
+    "Advice & Discussion", "Food", "Nature & Earth", "Other",
+]
+
+
+def classify_subreddit_category(subreddit):
+    """Best-effort topic grouping for a subreddit, based on the static
+    SUBREDDIT_CATEGORIES mapping above. Falls back to "Other" for anything
+    not in the list.
+    """
+    name = subreddit.lower()
+    for category, names in SUBREDDIT_CATEGORIES.items():
+        if name in names:
+            return category
+    return "Other"
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
@@ -418,6 +498,18 @@ def group_by_subreddit(posts, blacklist):
     return sections
 
 
+def group_by_category(sections):
+    """Group subreddit sections into topic categories, in CATEGORY_ORDER.
+    Returns an ordered dict: category -> {subreddit: [posts]}, omitting
+    any category with no subreddits present this run.
+    """
+    by_category = {cat: {} for cat in CATEGORY_ORDER}
+    for subreddit, posts in sections.items():
+        category = classify_subreddit_category(subreddit)
+        by_category[category][subreddit] = posts
+    return {cat: subs for cat, subs in by_category.items() if subs}
+
+
 def build_section_html(subreddit, posts):
     rows = []
     for i, p in enumerate(posts, start=1):
@@ -504,18 +596,34 @@ def build_section_html(subreddit, posts):
 </table>"""
 
 
+def build_category_html(category, subreddit_posts):
+    """Build one category's block: a category header followed by each of
+    its subreddits' post lists.
+    """
+    sub_parts = [build_section_html(sub, posts) for sub, posts in subreddit_posts.items()]
+    return f"""
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+  <tr><td style="background:#1a1a1b; padding:6px 10px; border-radius:4px;">
+    <span style="color:#fff; font-size:13px; font-weight:700; font-family:Arial,Helvetica,sans-serif; letter-spacing:0.5px;">{escape(category.upper())}</span>
+  </td></tr>
+</table>
+{''.join(sub_parts)}"""
+
+
 def build_html(sections):
     total = sum(len(posts) for posts in sections.values())
+    by_category = group_by_category(sections)
 
     # Two-column layout needs an HTML table (not flexbox/grid - those
     # aren't reliably supported across email clients, especially Outlook).
-    # Subreddits alternate between columns to keep them roughly balanced;
-    # this doesn't perfectly balance by post COUNT per subreddit, but is a
-    # simple, good-enough split for a list like this.
+    # Whole CATEGORIES alternate between columns (not individual
+    # subreddits) so a category's subreddits stay together rather than
+    # splitting across both columns. This doesn't perfectly balance
+    # column height, but keeps each category visually intact.
     left_parts, right_parts = [], []
-    for i, (sub, posts) in enumerate(sections.items()):
+    for i, (category, subreddit_posts) in enumerate(by_category.items()):
         target = left_parts if i % 2 == 0 else right_parts
-        target.append(build_section_html(sub, posts))
+        target.append(build_category_html(category, subreddit_posts))
 
     return f"""\
 <html>
@@ -553,21 +661,24 @@ def build_html(sections):
 
 def build_plain_text(sections):
     lines = []
-    for sub, posts in sections.items():
-        lines.append(f"--- r/{sub} ---")
-        for p in posts:
-            score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
-            comments_part = f"[{p['comments']:,} comments] " if p.get("comments") is not None else ""
-            type_part = f"[{p['type']}] " if p.get("type") else ""
-            lines.append(f"{type_part}{score_part}{comments_part}{p['title']} (u/{p['author']}) - {p['url']}")
-            if p.get("body"):
-                lines.append(f"  {p['body']}")
-            if p.get("video") and SHOW_VIDEO_LINKS:
-                lines.append(f"  Video: {p['video']}")
-            if p.get("top_comment"):
-                tc = p["top_comment"]
-                lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {tc['body']}")
-        lines.append("")
+    by_category = group_by_category(sections)
+    for category, subreddit_posts in by_category.items():
+        lines.append(f"=== {category.upper()} ===")
+        for sub, posts in subreddit_posts.items():
+            lines.append(f"--- r/{sub} ---")
+            for p in posts:
+                score_part = f"[{p['score']:,} pts] " if p.get("score") is not None else ""
+                comments_part = f"[{p['comments']:,} comments] " if p.get("comments") is not None else ""
+                type_part = f"[{p['type']}] " if p.get("type") else ""
+                lines.append(f"{type_part}{score_part}{comments_part}{p['title']} (u/{p['author']}) - {p['url']}")
+                if p.get("body"):
+                    lines.append(f"  {p['body']}")
+                if p.get("video") and SHOW_VIDEO_LINKS:
+                    lines.append(f"  Video: {p['video']}")
+                if p.get("top_comment"):
+                    tc = p["top_comment"]
+                    lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {tc['body']}")
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -643,6 +754,11 @@ def main():
     except Exception:
         now = datetime.now()
     timestamp = now.strftime("%b %d, %Y %I:%M %p")
+
+    other_subs = [s for s in sections if classify_subreddit_category(s) == "Other"]
+    if other_subs:
+        print(f"Category coverage: {len(other_subs)}/{len(sections)} subreddit(s) uncategorized "
+              f"(shown under Other): {', '.join(sorted(other_subs))}")
 
     subject = f"{total} top Reddit posts - {timestamp}"
 
