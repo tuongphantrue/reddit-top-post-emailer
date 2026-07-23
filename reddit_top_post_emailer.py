@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-topic-grouping"
+SCRIPT_VERSION = "2026-07-foldable-posts"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -577,15 +577,27 @@ def build_section_html(subreddit, posts):
                 'margin-left:4px; vertical-align:middle;">&#128293; HOT</span>'
             )
 
+        # Fold body/image/video/comment behind a native <details> toggle -
+        # no JavaScript involved (email clients never run JS, universally,
+        # for security reasons), this is a plain HTML5 element some email
+        # renderers (Gmail's included) support natively. Clients that don't
+        # support it typically just show the content unfolded rather than
+        # breaking, so this degrades reasonably safely either way.
+        extra_content = f"{body_html}{image_html}{video_html}{comment_html}"
+        fold_html = ""
+        if extra_content.strip():
+            fold_html = f"""
+    <details style="margin-top:6px;">
+      <summary style="cursor:pointer; font-size:12px; color:#0066cc; font-family:Arial,Helvetica,sans-serif;">Show more</summary>
+      <div>{extra_content}</div>
+    </details>"""
+
         rows.append(f"""
 <tr>
   <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
     <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{i}. {title_esc}</a>{type_html}{hot_html}
     <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
-    {body_html}
-    {image_html}
-    {video_html}
-    {comment_html}
+    {fold_html}
   </td>
 </tr>""")
 
