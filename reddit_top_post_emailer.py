@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-foldable-posts"
+SCRIPT_VERSION = "2026-07-foldable-sections"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -602,10 +602,12 @@ def build_section_html(subreddit, posts):
 </tr>""")
 
     return f"""
-<h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<details open style="margin-bottom:6px;">
+  <summary style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:19px; font-weight:bold; cursor:pointer;">r/{escape(subreddit)}</summary>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 {''.join(rows)}
-</table>"""
+  </table>
+</details>"""
 
 
 def build_category_html(category, subreddit_posts):
