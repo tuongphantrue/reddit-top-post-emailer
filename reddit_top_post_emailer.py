@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-fold-indicator"
+SCRIPT_VERSION = "2026-07-visible-fold-button"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 600
@@ -603,7 +603,12 @@ def build_section_html(subreddit, posts):
 
     return f"""
 <details open style="margin-bottom:6px;">
-  <summary style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:19px; font-weight:bold; cursor:pointer;"><span style="color:#999; font-size:14px;">&#9662;</span> r/{escape(subreddit)}</summary>
+  <summary style="cursor:pointer; list-style:none;">
+    <span style="display:inline-block; background:#fff3ec; border:1px solid #ff4500; border-radius:4px; padding:4px 10px;">
+      <span style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:19px; font-weight:bold;">&#9660; r/{escape(subreddit)}</span>
+      <span style="color:#ff4500; font-family:Arial,Helvetica,sans-serif; font-size:11px; font-weight:normal;"> (tap to collapse)</span>
+    </span>
+  </summary>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 {''.join(rows)}
   </table>
