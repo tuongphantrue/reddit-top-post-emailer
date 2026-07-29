@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-comment-image-thumbnail"
+SCRIPT_VERSION = "2026-07-comment-image-unescape-fix"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -335,7 +335,7 @@ def extract_top_comment(comment_listing):
     image_match = COMMENT_IMAGE_URL_RE.search(best["body"])
     comment_image = None
     if image_match:
-        comment_image = image_match.group(0)
+        comment_image = image_match.group(0).replace("&amp;", "&")
         remaining = best["body"][:image_match.start()] + best["body"][image_match.end():]
         best["body"] = " ".join(remaining.split())  # collapse leftover double-spaces
 
