@@ -110,9 +110,18 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-per-subreddit-balance"
+SCRIPT_VERSION = "2026-07-comment-image-thumbnail"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
+# Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
+# directly into their comment text - common as a bare "reaction image"
+# reply with no other words. Used to pull it out of the displayed comment
+# text and show it as an actual thumbnail instead of a raw URL wall.
+COMMENT_IMAGE_URL_RE = re.compile(
+    r'https?://(?:i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it|i\.imgur\.com)/'
+    r'\S+?\.(?:jpg|jpeg|png|gif|gifv|webp)(?:\?\S*)?',
+    re.IGNORECASE,
+)
 MAX_BODY_CHARS = 350
 MAX_COMMENT_CHARS = 200
 
@@ -289,7 +298,13 @@ def extract_top_comment(comment_listing):
     listing (the second element of Reddit's post JSON response). Skips
     deleted/removed comments, stickied mod-note comments, and AutoModerator
     - none of those represent genuine community reaction. Returns
-    {"author": str, "body": str, "score": int} or None if nothing usable.
+    {"author": str, "body": str, "score": int, "image": url_or_None} or
+    None if nothing usable.
+
+    Some comments are just a bare Reddit-hosted image link (a "reaction
+    image" reply with no other text) - shown raw, that's an ugly wall of
+    URL text, so any such URL is pulled out of "body" and returned
+    separately as "image" to render as an actual small thumbnail instead.
     """
     try:
         children = comment_listing["data"]["children"]
@@ -316,8 +331,18 @@ def extract_top_comment(comment_listing):
 
     if best is None:
         return None
+
+    image_match = COMMENT_IMAGE_URL_RE.search(best["body"])
+    comment_image = None
+    if image_match:
+        comment_image = image_match.group(0)
+        remaining = best["body"][:image_match.start()] + best["body"][image_match.end():]
+        best["body"] = " ".join(remaining.split())  # collapse leftover double-spaces
+
     if len(best["body"]) > MAX_COMMENT_CHARS:
         best["body"] = best["body"][:MAX_COMMENT_CHARS] + "..."
+
+    best["image"] = comment_image
     return best
 
 
@@ -548,10 +573,18 @@ def _build_post_row_html(p, index):
     comment_html = ""
     tc = p.get("top_comment")
     if tc:
+        comment_text = f': {escape(tc["body"])}' if tc.get("body") else ""
+        comment_image_html = ""
+        if tc.get("image"):
+            comment_image_html = (
+                f'<img src="{escape(tc["image"])}" '
+                f'style="max-width:180px; height:auto; border-radius:4px; margin-top:4px; display:block;">'
+            )
         comment_html = (
             f'<div style="font-size:12px; color:#555; margin-top:8px; padding-left:10px; '
             f'border-left:3px solid #ddd; line-height:1.4;">'
-            f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}: {escape(tc["body"])}'
+            f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
+            f'{comment_image_html}'
             f'</div>'
         )
 
@@ -704,7 +737,8 @@ def build_plain_text(sections):
                     lines.append(f"  Video: {p['video']}")
                 if p.get("top_comment"):
                     tc = p["top_comment"]
-                    lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {tc['body']}")
+                    comment_text = tc["body"] if tc.get("body") else (f"[image: {tc['image']}]" if tc.get("image") else "")
+                    lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {comment_text}")
             lines.append("")
     return "\n".join(lines)
 
