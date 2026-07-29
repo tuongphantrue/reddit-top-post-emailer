@@ -123,6 +123,13 @@ Also note: since this runs every 30 minutes with no de-duplication, you'll
 get repeat emails of the same top posts throughout the day. Let me know if
 you'd like a "don't re-send the same post" tracker added.
 
+Collapsible/foldable `r/subreddit` sections were tried three separate ways
+(HTML `<details>`, a CSS checkbox toggle, and CSS `:target` anchor links)
+and all three were confirmed non-functional in Gmail - the email always
+shows everything expanded as a result. This isn't fixable from the code
+side; it's how Gmail's message-body rendering handles (or strips) these
+techniques.
+
 ## Notes
 
 - GitHub Actions free tier includes 2,000 minutes/month for private repos —
