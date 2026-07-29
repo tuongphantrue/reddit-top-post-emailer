@@ -110,11 +110,11 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-email-only-final"
+SCRIPT_VERSION = "2026-07-shrink-for-gmail-clipping"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
-MAX_BODY_CHARS = 600
-MAX_COMMENT_CHARS = 300
+MAX_BODY_CHARS = 350
+MAX_COMMENT_CHARS = 200
 
 # Posts scoring at or above this get a "HOT" badge alongside their type badge.
 HOT_SCORE_THRESHOLD = 50000
