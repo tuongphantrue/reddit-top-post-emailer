@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-shrink-for-gmail-clipping"
+SCRIPT_VERSION = "2026-07-balanced-columns"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 350
@@ -625,10 +625,24 @@ def build_html(sections):
     # subreddits) so a category's subreddits stay together rather than
     # splitting across both columns. This doesn't perfectly balance
     # column height, but keeps each category visually intact.
+    #
+    # Categories used to just alternate 1st/3rd/5th... vs 2nd/4th/6th...,
+    # which could easily put several large categories in one column and
+    # several tiny ones in the other, making the two columns very
+    # uneven in height. This instead always adds the next category to
+    # whichever column currently has FEWER total posts so far (a simple
+    # greedy balance) - still keeps each category's subreddits together,
+    # just distributes more evenly by actual content size.
     left_parts, right_parts = [], []
-    for i, (category, subreddit_posts) in enumerate(by_category.items()):
-        target = left_parts if i % 2 == 0 else right_parts
-        target.append(build_category_html(category, subreddit_posts))
+    left_count, right_count = 0, 0
+    for category, subreddit_posts in by_category.items():
+        category_post_count = sum(len(posts) for posts in subreddit_posts.values())
+        if left_count <= right_count:
+            left_parts.append(build_category_html(category, subreddit_posts))
+            left_count += category_post_count
+        else:
+            right_parts.append(build_category_html(category, subreddit_posts))
+            right_count += category_post_count
 
     return f"""\
 <html>
