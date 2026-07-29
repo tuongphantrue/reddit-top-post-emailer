@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-balanced-columns"
+SCRIPT_VERSION = "2026-07-per-subreddit-balance"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 MAX_BODY_CHARS = 350
@@ -601,48 +601,56 @@ def build_section_html(subreddit, posts):
 </table>"""
 
 
-def build_category_html(category, subreddit_posts):
-    """Build one category's block: a category header followed by each of
-    its subreddits' post lists.
-    """
-    sub_parts = [build_section_html(sub, posts) for sub, posts in subreddit_posts.items()]
-    return f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
-  <tr><td style="background:#1a1a1b; padding:6px 10px; border-radius:4px;">
-    <span style="color:#fff; font-size:13px; font-weight:700; font-family:Arial,Helvetica,sans-serif; letter-spacing:0.5px;">{escape(category.upper())}</span>
-  </td></tr>
-</table>
-{''.join(sub_parts)}"""
-
-
 def build_html(sections):
     total = sum(len(posts) for posts in sections.values())
     by_category = group_by_category(sections)
 
     # Two-column layout needs an HTML table (not flexbox/grid - those
     # aren't reliably supported across email clients, especially Outlook).
-    # Whole CATEGORIES alternate between columns (not individual
-    # subreddits) so a category's subreddits stay together rather than
-    # splitting across both columns. This doesn't perfectly balance
-    # column height, but keeps each category visually intact.
     #
-    # Categories used to just alternate 1st/3rd/5th... vs 2nd/4th/6th...,
-    # which could easily put several large categories in one column and
-    # several tiny ones in the other, making the two columns very
-    # uneven in height. This instead always adds the next category to
-    # whichever column currently has FEWER total posts so far (a simple
-    # greedy balance) - still keeps each category's subreddits together,
-    # just distributes more evenly by actual content size.
-    left_parts, right_parts = [], []
+    # Balancing used to happen at the whole-CATEGORY level, but categories
+    # vary a lot in size (one might have 8 posts, another just 1), so even
+    # smart category-level balancing could still leave a real gap. This
+    # balances by individual SUBREDDIT instead - much finer-grained, so
+    # column heights end up much closer to even. The tradeoff: a
+    # category's subreddits can now end up split across both columns
+    # (unlike before, where a whole category always stayed together in
+    # one column). Each column tracks its own "last category shown" so it
+    # only prints a category header when that column's category actually
+    # changes, avoiding duplicate/missing headers.
+    flat_subreddits = [
+        (category, sub, posts)
+        for category, subreddit_posts in by_category.items()
+        for sub, posts in subreddit_posts.items()
+    ]
+
+    left_items, right_items = [], []
     left_count, right_count = 0, 0
-    for category, subreddit_posts in by_category.items():
-        category_post_count = sum(len(posts) for posts in subreddit_posts.values())
+    for category, sub, posts in flat_subreddits:
         if left_count <= right_count:
-            left_parts.append(build_category_html(category, subreddit_posts))
-            left_count += category_post_count
+            left_items.append((category, sub, posts))
+            left_count += len(posts)
         else:
-            right_parts.append(build_category_html(category, subreddit_posts))
-            right_count += category_post_count
+            right_items.append((category, sub, posts))
+            right_count += len(posts)
+
+    def render_column(items):
+        parts = []
+        last_category = None
+        for category, sub, posts in items:
+            if category != last_category:
+                parts.append(f"""
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+  <tr><td style="background:#1a1a1b; padding:6px 10px; border-radius:4px;">
+    <span style="color:#fff; font-size:13px; font-weight:700; font-family:Arial,Helvetica,sans-serif; letter-spacing:0.5px;">{escape(category.upper())}</span>
+  </td></tr>
+</table>""")
+                last_category = category
+            parts.append(build_section_html(sub, posts))
+        return "".join(parts)
+
+    left_parts = [render_column(left_items)]
+    right_parts = [render_column(right_items)]
 
     return f"""\
 <html>
