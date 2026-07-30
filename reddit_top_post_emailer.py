@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-card-style"
+SCRIPT_VERSION = "2026-07-app-style-cards"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -586,14 +586,15 @@ def _build_post_row_html(p, index):
                 f'style="max-width:180px; height:auto; border-radius:6px; margin-top:6px; display:block;">'
             )
         comment_html = (
-            f'<div style="font-size:12px; color:#555; margin-top:10px; padding:8px 10px; '
-            f'background:#f8f9fa; border-radius:6px; line-height:1.5;">'
+            f'<div style="font-size:12px; color:#555; margin-top:10px; padding:10px 12px; '
+            f'background:#f8f9fa; border-radius:10px; line-height:1.5;">'
             f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
             f'{comment_image_html}'
             f'</div>'
         )
 
     type_html = ""
+    type_color = "#6b7280"
     if p.get("type"):
         # (text color, light background) pairs - explicit hex rather than
         # an alpha-suffix hack like "#2563eb1a", since 8-digit hex-alpha
@@ -603,13 +604,13 @@ def _build_post_row_html(p, index):
             "Text": ("#6b7280", "#f9fafb"), "Gallery": ("#059669", "#ecfdf5"),
             "Link": ("#ea580c", "#fff7ed"),
         }
-        color, bg = type_colors.get(p["type"], ("#6b7280", "#f9fafb"))
+        type_color, bg = type_colors.get(p["type"], ("#6b7280", "#f9fafb"))
         type_label = p["type"].upper()
         if p["type"] == "Link" and p.get("domain"):
             type_label = f'{type_label} \u2192 {p["domain"]}'
         type_html = (
-            f'<span style="font-size:10px; font-weight:600; color:{color}; '
-            f'background:{bg}; border-radius:4px; padding:2px 6px; '
+            f'<span style="font-size:10px; font-weight:600; color:{type_color}; '
+            f'background:{bg}; border-radius:20px; padding:3px 9px; '
             f'margin-left:6px; vertical-align:middle;">{escape(type_label)}</span>'
         )
 
@@ -617,14 +618,21 @@ def _build_post_row_html(p, index):
     if p.get("score") is not None and p["score"] >= HOT_SCORE_THRESHOLD:
         hot_html = (
             '<span style="font-size:10px; font-weight:700; color:#fff; '
-            'background:#dc2626; border-radius:4px; padding:2px 6px; '
+            'background:#dc2626; border-radius:20px; padding:3px 9px; '
             'margin-left:4px; vertical-align:middle;">&#128293; HOT</span>'
         )
 
+    # Card styling inspired by Rework's board/card UI: a soft shadow for
+    # depth (rather than a flat border alone), fully-rounded pill badges
+    # above, and a colored left accent stripe matching the post's type -
+    # common "status at a glance" conventions in board-style apps. Gmail
+    # (web and app) renders box-shadow and border-radius fine; Outlook
+    # desktop ignores both gracefully (square corners, no shadow, nothing
+    # breaks).
     return f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px; background:#ffffff; border:1px solid #e5e7eb; border-radius:10px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px; background:#ffffff; border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04); border-left:4px solid {type_color};">
   <tr>
-    <td style="padding:16px; font-family:Arial,Helvetica,sans-serif;">
+    <td style="padding:16px 16px 16px 14px; font-family:Arial,Helvetica,sans-serif;">
       <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none; line-height:1.4;">{index}. {title_esc}</a>{type_html}{hot_html}
       <div style="font-size:12px; color:#888; margin-top:6px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
       {body_html}
