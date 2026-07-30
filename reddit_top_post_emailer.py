@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-comment-image-unescape-fix"
+SCRIPT_VERSION = "2026-07-card-style"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -536,9 +536,14 @@ def group_by_category(sections):
 
 
 def _build_post_row_html(p, index):
-    """Build one post's <tr> row HTML. Shared between the email version
-    (build_section_html) and the interactive webpage version
-    (build_page_section_html) so the two don't drift out of sync.
+    """Build one post as a self-contained card (its own small table, not a
+    <tr> inside a shared one) - rounded corners and borders render most
+    predictably in email when each card is its own table rather than
+    trying to round individual cells in one big shared table.
+
+    NOTE: border-radius isn't supported in Outlook desktop's rendering
+    engine - cards will show square corners there instead of rounded,
+    but nothing breaks. Gmail (web and app) supports it fine.
     """
     title_esc = escape(p["title"])
 
@@ -555,7 +560,7 @@ def _build_post_row_html(p, index):
         image_html = (
             f'<img src="{escape(p["image"])}" '
             f'style="width:100%; max-width:280px; height:auto; '
-            f'border-radius:6px; margin-top:8px; display:block;">'
+            f'border-radius:8px; margin-top:10px; display:block;">'
         )
 
     video_html = ""
@@ -568,7 +573,7 @@ def _build_post_row_html(p, index):
 
     body_html = ""
     if p.get("body"):
-        body_html = f'<div style="font-size:13px; color:#333; margin-top:8px; line-height:1.4;">{escape(p["body"])}</div>'
+        body_html = f'<div style="font-size:13px; color:#333; margin-top:10px; line-height:1.5;">{escape(p["body"])}</div>'
 
     comment_html = ""
     tc = p.get("top_comment")
@@ -578,11 +583,11 @@ def _build_post_row_html(p, index):
         if tc.get("image"):
             comment_image_html = (
                 f'<img src="{escape(tc["image"])}" '
-                f'style="max-width:180px; height:auto; border-radius:4px; margin-top:4px; display:block;">'
+                f'style="max-width:180px; height:auto; border-radius:6px; margin-top:6px; display:block;">'
             )
         comment_html = (
-            f'<div style="font-size:12px; color:#555; margin-top:8px; padding-left:10px; '
-            f'border-left:3px solid #ddd; line-height:1.4;">'
+            f'<div style="font-size:12px; color:#555; margin-top:10px; padding:8px 10px; '
+            f'background:#f8f9fa; border-radius:6px; line-height:1.5;">'
             f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
             f'{comment_image_html}'
             f'</div>'
@@ -590,17 +595,21 @@ def _build_post_row_html(p, index):
 
     type_html = ""
     if p.get("type"):
+        # (text color, light background) pairs - explicit hex rather than
+        # an alpha-suffix hack like "#2563eb1a", since 8-digit hex-alpha
+        # isn't universally safe across email clients.
         type_colors = {
-            "Image": "#0066cc", "Video": "#8b5cf6", "Text": "#6b7280",
-            "Gallery": "#059669", "Link": "#ea580c",
+            "Image": ("#2563eb", "#eff6ff"), "Video": ("#8b5cf6", "#f5f3ff"),
+            "Text": ("#6b7280", "#f9fafb"), "Gallery": ("#059669", "#ecfdf5"),
+            "Link": ("#ea580c", "#fff7ed"),
         }
-        color = type_colors.get(p["type"], "#6b7280")
+        color, bg = type_colors.get(p["type"], ("#6b7280", "#f9fafb"))
         type_label = p["type"].upper()
         if p["type"] == "Link" and p.get("domain"):
             type_label = f'{type_label} \u2192 {p["domain"]}'
         type_html = (
             f'<span style="font-size:10px; font-weight:600; color:{color}; '
-            f'border:1px solid {color}; border-radius:3px; padding:1px 5px; '
+            f'background:{bg}; border-radius:4px; padding:2px 6px; '
             f'margin-left:6px; vertical-align:middle;">{escape(type_label)}</span>'
         )
 
@@ -608,30 +617,30 @@ def _build_post_row_html(p, index):
     if p.get("score") is not None and p["score"] >= HOT_SCORE_THRESHOLD:
         hot_html = (
             '<span style="font-size:10px; font-weight:700; color:#fff; '
-            'background:#dc2626; border-radius:3px; padding:1px 5px; '
+            'background:#dc2626; border-radius:4px; padding:2px 6px; '
             'margin-left:4px; vertical-align:middle;">&#128293; HOT</span>'
         )
 
     return f"""
-<tr>
-  <td style="padding:14px 0; border-bottom:1px solid #eee; font-family:Arial,Helvetica,sans-serif;">
-    <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none;">{index}. {title_esc}</a>{type_html}{hot_html}
-    <div style="font-size:12px; color:#888; margin-top:4px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
-    {body_html}
-    {image_html}
-    {video_html}
-    {comment_html}
-  </td>
-</tr>"""
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px; background:#ffffff; border:1px solid #e5e7eb; border-radius:10px;">
+  <tr>
+    <td style="padding:16px; font-family:Arial,Helvetica,sans-serif;">
+      <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none; line-height:1.4;">{index}. {title_esc}</a>{type_html}{hot_html}
+      <div style="font-size:12px; color:#888; margin-top:6px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
+      {body_html}
+      {image_html}
+      {video_html}
+      {comment_html}
+    </td>
+  </tr>
+</table>"""
 
 
 def build_section_html(subreddit, posts):
-    rows = [_build_post_row_html(p, i) for i, p in enumerate(posts, start=1)]
+    cards = [_build_post_row_html(p, i) for i, p in enumerate(posts, start=1)]
     return f"""
 <h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-{''.join(rows)}
-</table>"""
+{''.join(cards)}"""
 
 
 def build_html(sections):
