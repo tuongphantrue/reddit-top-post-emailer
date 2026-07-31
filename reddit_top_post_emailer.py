@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-rework-style-redesign"
+SCRIPT_VERSION = "2026-07-deeper-reply-search"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -293,12 +293,22 @@ def classify_post_type(post_data):
     return "Link"
 
 
-def _walk_comments(children, depth=0, parent_author=None, max_depth=1):
+def _walk_comments(children, depth=0, parent_author=None, max_depth=6):
     """Yield candidate comment dicts from a Reddit comment tree, recursing
-    into replies up to max_depth levels deep (default: top-level comments
-    plus their direct replies, not deeper - keeps this bounded rather than
-    walking an entire, potentially huge, reply tree). Each candidate:
-    {"author", "body", "score", "is_reply", "parent_author"}.
+    into replies up to max_depth levels deep. Default of 6 is deep enough
+    to cover effectively all of what a single post-detail request already
+    returns - Reddit's own reply-collapsing (the "X more replies" stub,
+    kind="more") kicks in before typical threads get much deeper than
+    this in one response anyway, so higher wouldn't find much more.
+
+    NOTE: this only searches replies Reddit ALREADY included in the same
+    response we fetch for score/image/body (no extra requests) - it does
+    NOT expand Reddit's own "X more replies" collapsed stubs (kind="more"
+    children, skipped below), since fetching those would need a separate
+    API call per stub. In practice this still finds the vast majority of
+    highly-upvoted replies, since Reddit's default response is generous
+    for top-sorted threads; only very deep or very large threads have
+    genuinely hidden high-scoring replies this can't see.
     """
     for child in children:
         if child.get("kind") != "t1":  # skip "more comments" stubs etc.
@@ -324,9 +334,12 @@ def _walk_comments(children, depth=0, parent_author=None, max_depth=1):
 
 
 def extract_top_comments(comment_listing, max_comments=2, min_score_ratio=0.2):
-    """Pick up to max_comments highest-scored real comments (and their
-    direct replies) from a post's comment listing (the second element of
-    Reddit's post JSON response). The single highest-scored one is always
+    """Pick up to max_comments highest-scored real comments from a post's
+    comment listing (the second element of Reddit's post JSON response) -
+    searching top-level comments AND replies nested several levels deep
+    (see _walk_comments), not just top-level ones, so a highly-upvoted
+    reply-to-a-reply can surface even if its parent comment wasn't
+    particularly popular. The single highest-scored one overall is always
     included; additional ones are only included if their score is at
     least min_score_ratio of the top comment's score - so a second/third
     comment only shows up when it's ALSO genuinely highly upvoted, not
