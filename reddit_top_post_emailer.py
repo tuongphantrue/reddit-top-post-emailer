@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-app-style-cards"
+SCRIPT_VERSION = "2026-07-rework-style-redesign"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -293,13 +293,47 @@ def classify_post_type(post_data):
     return "Link"
 
 
-def extract_top_comment(comment_listing):
-    """Pick the highest-scored real top-level comment from a post's comment
-    listing (the second element of Reddit's post JSON response). Skips
-    deleted/removed comments, stickied mod-note comments, and AutoModerator
-    - none of those represent genuine community reaction. Returns
-    {"author": str, "body": str, "score": int, "image": url_or_None} or
-    None if nothing usable.
+def _walk_comments(children, depth=0, parent_author=None, max_depth=1):
+    """Yield candidate comment dicts from a Reddit comment tree, recursing
+    into replies up to max_depth levels deep (default: top-level comments
+    plus their direct replies, not deeper - keeps this bounded rather than
+    walking an entire, potentially huge, reply tree). Each candidate:
+    {"author", "body", "score", "is_reply", "parent_author"}.
+    """
+    for child in children:
+        if child.get("kind") != "t1":  # skip "more comments" stubs etc.
+            continue
+        d = child.get("data", {})
+        if not d.get("stickied"):
+            author = d.get("author")
+            body = (d.get("body") or "").strip()
+            if (body and body not in ("[deleted]", "[removed]")
+                    and author not in (None, "[deleted]", "AutoModerator")):
+                yield {
+                    "author": author,
+                    "body": body,
+                    "score": d.get("score", 0) or 0,
+                    "is_reply": parent_author is not None,
+                    "parent_author": parent_author,
+                }
+        if depth < max_depth:
+            replies = d.get("replies")
+            if isinstance(replies, dict):
+                reply_children = replies.get("data", {}).get("children", [])
+                yield from _walk_comments(reply_children, depth + 1, d.get("author"), max_depth)
+
+
+def extract_top_comments(comment_listing, max_comments=2, min_score_ratio=0.2):
+    """Pick up to max_comments highest-scored real comments (and their
+    direct replies) from a post's comment listing (the second element of
+    Reddit's post JSON response). The single highest-scored one is always
+    included; additional ones are only included if their score is at
+    least min_score_ratio of the top comment's score - so a second/third
+    comment only shows up when it's ALSO genuinely highly upvoted, not
+    just "the next best regardless of how low that is." Skips
+    deleted/removed comments, stickied mod-note comments, and
+    AutoModerator. Returns a list (possibly empty) of
+    {"author", "body", "score", "image", "is_reply", "parent_author"}.
 
     Some comments are just a bare Reddit-hosted image link (a "reaction
     image" reply with no other text) - shown raw, that's an ugly wall of
@@ -309,49 +343,41 @@ def extract_top_comment(comment_listing):
     try:
         children = comment_listing["data"]["children"]
     except (KeyError, TypeError):
-        return None
+        return []
 
-    best = None
-    for child in children:
-        if child.get("kind") != "t1":  # skip "more comments" stubs etc.
-            continue
-        d = child.get("data", {})
-        if d.get("stickied"):
-            continue
-        author = d.get("author")
-        body = (d.get("body") or "").strip()
-        if not body or body in ("[deleted]", "[removed]"):
-            continue
-        if author in (None, "[deleted]", "AutoModerator"):
-            continue
+    candidates = list(_walk_comments(children))
+    if not candidates:
+        return []
 
-        score = d.get("score", 0) or 0
-        if best is None or score > best["score"]:
-            best = {"author": author, "body": body, "score": score}
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    top_score = candidates[0]["score"]
 
-    if best is None:
-        return None
+    selected = [candidates[0]]
+    for c in candidates[1:]:
+        if len(selected) >= max_comments:
+            break
+        if top_score > 0 and c["score"] >= top_score * min_score_ratio:
+            selected.append(c)
 
-    image_match = COMMENT_IMAGE_URL_RE.search(best["body"])
-    comment_image = None
-    if image_match:
-        comment_image = image_match.group(0).replace("&amp;", "&")
-        remaining = best["body"][:image_match.start()] + best["body"][image_match.end():]
-        best["body"] = " ".join(remaining.split())  # collapse leftover double-spaces
+    for c in selected:
+        image_match = COMMENT_IMAGE_URL_RE.search(c["body"])
+        c["image"] = None
+        if image_match:
+            c["image"] = image_match.group(0).replace("&amp;", "&")
+            remaining = c["body"][:image_match.start()] + c["body"][image_match.end():]
+            c["body"] = " ".join(remaining.split())  # collapse leftover double-spaces
+        if len(c["body"]) > MAX_COMMENT_CHARS:
+            c["body"] = c["body"][:MAX_COMMENT_CHARS] + "..."
 
-    if len(best["body"]) > MAX_COMMENT_CHARS:
-        best["body"] = best["body"][:MAX_COMMENT_CHARS] + "..."
-
-    best["image"] = comment_image
-    return best
+    return selected
 
 
 def fetch_post_detail(permalink):
     """Fetch a single post's own JSON data (with the login cookie attached,
     if configured) to get its post type, score, thumbnail/preview image,
-    full self-text body, and top comment. Returns {"type": str_or_None,
+    full self-text body, and top comment(s). Returns {"type": str_or_None,
     "score": int_or_None, "image": url_or_None, "video": url_or_None,
-    "body": text_or_"", "top_comment": dict_or_None}. No retry-on-429: a
+    "body": text_or_"", "top_comments": list}. No retry-on-429: a
     single retry rarely helps and just adds runtime - better to move on to
     the next post.
 
@@ -371,11 +397,14 @@ def fetch_post_detail(permalink):
     under media_metadata rather than preview.images - only the first image
     is shown here as a representative thumbnail, not the full gallery.
 
-    NOTE ON TOP COMMENT: comes from the SAME request as the post itself -
+    NOTE ON TOP COMMENTS: comes from the SAME request as the post itself -
     Reddit's post JSON response includes both the post (data[0]) and its
-    comment tree (data[1]) in one call, so this adds no extra requests.
+    comment tree (data[1]) in one call, so this adds no extra requests,
+    even though it now also walks into direct replies (see
+    extract_top_comments) to find highly-upvoted replies, not just
+    top-level comments.
     """
-    empty = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comment": None}
+    empty = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": []}
     if not permalink:
         return empty
 
@@ -389,9 +418,9 @@ def fetch_post_detail(permalink):
     except (ValueError, KeyError, IndexError, TypeError):
         return empty
 
-    top_comment = None
+    top_comments = []
     if len(data) > 1:
-        top_comment = extract_top_comment(data[1])
+        top_comments = extract_top_comments(data[1])
 
     post_type = classify_post_type(post_data)
     score = post_data.get("score")
@@ -452,7 +481,7 @@ def fetch_post_detail(permalink):
             image_url = thumb
 
     return {"type": post_type, "score": score, "comments": comments, "domain": domain, "image": image_url,
-            "video": video_url, "body": body_text, "top_comment": top_comment}
+            "video": video_url, "body": body_text, "top_comments": top_comments}
 
 
 def enrich_posts(posts):
@@ -465,7 +494,7 @@ def enrich_posts(posts):
     if not REDDIT_COOKIE:
         print("  REDDIT_COOKIE not set - skipping type/image/video/body/score/comment enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"] = None, None, None, None, None, None, "", []
         return posts
 
     consecutive_blocked = 0
@@ -475,14 +504,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comment"] = None, None, None, None, None, None, "", None
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"] = None, None, None, None, None, None, "", []
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comment": None}
+            detail = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": []}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -496,7 +525,7 @@ def enrich_posts(posts):
         p["domain"] = detail["domain"]
         p["image"] = detail["image"]
         p["video"] = detail["video"]
-        p["top_comment"] = detail["top_comment"]
+        p["top_comments"] = detail["top_comments"]
         p["body"] = detail["body"]
 
     print(f"  Got score/image/video/body for {got_content}/{len(posts)} post(s)")
@@ -576,22 +605,29 @@ def _build_post_row_html(p, index):
         body_html = f'<div style="font-size:13px; color:#333; margin-top:10px; line-height:1.5;">{escape(p["body"])}</div>'
 
     comment_html = ""
-    tc = p.get("top_comment")
-    if tc:
-        comment_text = f': {escape(tc["body"])}' if tc.get("body") else ""
-        comment_image_html = ""
-        if tc.get("image"):
-            comment_image_html = (
-                f'<img src="{escape(tc["image"])}" '
-                f'style="max-width:180px; height:auto; border-radius:6px; margin-top:6px; display:block;">'
+    top_comments = p.get("top_comments") or []
+    if top_comments:
+        panels = []
+        for tc in top_comments:
+            comment_text = f': {escape(tc["body"])}' if tc.get("body") else ""
+            comment_image_html = ""
+            if tc.get("image"):
+                comment_image_html = (
+                    f'<img src="{escape(tc["image"])}" '
+                    f'style="max-width:180px; height:auto; border-radius:6px; margin-top:6px; display:block;">'
+                )
+            reply_prefix = ""
+            if tc.get("is_reply") and tc.get("parent_author"):
+                reply_prefix = f'<div style="font-size:10px; color:#999; margin-bottom:2px;">&#8618; reply to u/{escape(tc["parent_author"])}</div>'
+            panels.append(
+                f'<div style="font-size:12px; color:#555; margin-top:8px; padding:10px 12px; '
+                f'background:#f8f9fa; border-radius:10px; line-height:1.5;">'
+                f'{reply_prefix}'
+                f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
+                f'{comment_image_html}'
+                f'</div>'
             )
-        comment_html = (
-            f'<div style="font-size:12px; color:#555; margin-top:10px; padding:10px 12px; '
-            f'background:#f8f9fa; border-radius:10px; line-height:1.5;">'
-            f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
-            f'{comment_image_html}'
-            f'</div>'
-        )
+        comment_html = "".join(panels)
 
     type_html = ""
     type_color = "#6b7280"
@@ -632,7 +668,7 @@ def _build_post_row_html(p, index):
     return f"""
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px; background:#ffffff; border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04); border-left:4px solid {type_color};">
   <tr>
-    <td style="padding:16px 16px 16px 14px; font-family:Arial,Helvetica,sans-serif;">
+    <td style="padding:16px 16px 16px 14px; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif;">
       <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none; line-height:1.4;">{index}. {title_esc}</a>{type_html}{hot_html}
       <div style="font-size:12px; color:#888; margin-top:6px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
       {body_html}
@@ -647,7 +683,10 @@ def _build_post_row_html(p, index):
 def build_section_html(subreddit, posts):
     cards = [_build_post_row_html(p, i) for i, p in enumerate(posts, start=1)]
     return f"""
-<h2 style="color:#ff4500; font-family:Arial,Helvetica,sans-serif;">r/{escape(subreddit)}</h2>
+<div style="margin:16px 0 10px 0;">
+  <span style="display:inline-block; width:6px; height:6px; background:#4f46e5; border-radius:50%; margin-right:8px; vertical-align:middle;"></span>
+  <span style="color:#374151; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:15px; font-weight:700; vertical-align:middle;">r/{escape(subreddit)}</span>
+</div>
 {''.join(cards)}"""
 
 
@@ -689,10 +728,15 @@ def build_html(sections):
         last_category = None
         for category, sub, posts in items:
             if category != last_category:
+                # Category tag styled as a refined pill (light indigo
+                # tint, rounded, uppercase small-caps label) rather than a
+                # flat black bar - matches the operations-app convention
+                # of one consistent primary accent color used throughout
+                # the chrome, instead of high-contrast black/white blocks.
                 parts.append(f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
-  <tr><td style="background:#1a1a1b; padding:6px 10px; border-radius:4px;">
-    <span style="color:#fff; font-size:13px; font-weight:700; font-family:Arial,Helvetica,sans-serif; letter-spacing:0.5px;">{escape(category.upper())}</span>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
+  <tr><td>
+    <span style="display:inline-block; background:#eef2ff; color:#4f46e5; font-size:11px; font-weight:700; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; letter-spacing:0.6px; padding:5px 12px; border-radius:20px;">{escape(category.upper())}</span>
   </td></tr>
 </table>""")
                 last_category = category
@@ -717,8 +761,13 @@ def build_html(sections):
   }}
 </style>
 </head>
-<body style="margin:0; padding:20px; background:#f4f4f4;">
-  <h1 style="color:#222; font-family:Arial,Helvetica,sans-serif;">&#128293; {total} Top Reddit Posts Today</h1>
+<body style="margin:0; padding:20px; background:#f7f8fb;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px; margin-bottom:18px;">
+    <tr><td style="background:#ffffff; border-radius:14px; padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);">
+      <div style="color:#111827; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:22px; font-weight:700;">&#128293; {total} Top Reddit Posts Today</div>
+      <div style="color:#6b7280; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:13px; margin-top:4px;">Across {len(sections)} subreddits</div>
+    </td></tr>
+  </table>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;">
     <tr>
       <td class="digest-col" valign="top" width="50%" style="padding-right:16px;">
@@ -729,7 +778,7 @@ def build_html(sections):
       </td>
     </tr>
   </table>
-  <p style="color:#999; font-size:12px; font-family:Arial,Helvetica,sans-serif; margin-top:20px;">
+  <p style="color:#999; font-size:12px; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; margin-top:20px;">
     Sent automatically by reddit-top-post-emailer via GitHub Actions.
   </p>
 </body>
@@ -752,10 +801,10 @@ def build_plain_text(sections):
                     lines.append(f"  {p['body']}")
                 if p.get("video") and SHOW_VIDEO_LINKS:
                     lines.append(f"  Video: {p['video']}")
-                if p.get("top_comment"):
-                    tc = p["top_comment"]
+                for tc in (p.get("top_comments") or []):
                     comment_text = tc["body"] if tc.get("body") else (f"[image: {tc['image']}]" if tc.get("image") else "")
-                    lines.append(f"  Top comment ({tc['score']:,} pts, u/{tc['author']}): {comment_text}")
+                    label = f"Reply to u/{tc['parent_author']}" if tc.get("is_reply") else "Top comment"
+                    lines.append(f"  {label} ({tc['score']:,} pts, u/{tc['author']}): {comment_text}")
             lines.append("")
     return "\n".join(lines)
 
