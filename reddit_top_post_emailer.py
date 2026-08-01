@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-deeper-reply-search"
+SCRIPT_VERSION = "2026-07-comment-indentation"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -325,6 +325,7 @@ def _walk_comments(children, depth=0, parent_author=None, max_depth=6):
                     "score": d.get("score", 0) or 0,
                     "is_reply": parent_author is not None,
                     "parent_author": parent_author,
+                    "depth": depth,
                 }
         if depth < max_depth:
             replies = d.get("replies")
@@ -346,7 +347,7 @@ def extract_top_comments(comment_listing, max_comments=2, min_score_ratio=0.2):
     just "the next best regardless of how low that is." Skips
     deleted/removed comments, stickied mod-note comments, and
     AutoModerator. Returns a list (possibly empty) of
-    {"author", "body", "score", "image", "is_reply", "parent_author"}.
+    {"author", "body", "score", "image", "is_reply", "parent_author", "depth"}.
 
     Some comments are just a bare Reddit-hosted image link (a "reaction
     image" reply with no other text) - shown raw, that's an ugly wall of
@@ -629,12 +630,19 @@ def _build_post_row_html(p, index):
                     f'<img src="{escape(tc["image"])}" '
                     f'style="max-width:180px; height:auto; border-radius:6px; margin-top:6px; display:block;">'
                 )
+            # Reddit-style nesting: replies get progressively indented
+            # (capped at depth 4 so it can't run out of room in a narrow
+            # email column) with a thin left "thread line" connecting
+            # them to their parent, matching Reddit's own threaded-reply
+            # visual convention rather than just a text label.
+            depth = min(tc.get("depth", 0), 4)
+            indent_style = f"margin-left:{depth * 16}px; border-left:2px solid #d1d5db; padding-left:10px;" if depth > 0 else ""
             reply_prefix = ""
             if tc.get("is_reply") and tc.get("parent_author"):
                 reply_prefix = f'<div style="font-size:10px; color:#999; margin-bottom:2px;">&#8618; reply to u/{escape(tc["parent_author"])}</div>'
             panels.append(
                 f'<div style="font-size:12px; color:#555; margin-top:8px; padding:10px 12px; '
-                f'background:#f8f9fa; border-radius:10px; line-height:1.5;">'
+                f'{indent_style} background:#f8f9fa; border-radius:10px; line-height:1.5;">'
                 f'{reply_prefix}'
                 f'&#128172; <b>{tc["score"]:,}</b> u/{escape(tc["author"])}{comment_text}'
                 f'{comment_image_html}'
