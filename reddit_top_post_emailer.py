@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-comment-indentation"
+SCRIPT_VERSION = "2026-07-inter-font"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -689,7 +689,7 @@ def _build_post_row_html(p, index):
     return f"""
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px; background:#ffffff; border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04); border-left:4px solid {type_color};">
   <tr>
-    <td style="padding:16px 16px 16px 14px; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif;">
+    <td style="padding:16px 16px 16px 14px; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif;">
       <a href="{escape(p['url'] or '#')}" style="font-size:14px; font-weight:600; color:#1a1a1b; text-decoration:none; line-height:1.4;">{index}. {title_esc}</a>{type_html}{hot_html}
       <div style="font-size:12px; color:#888; margin-top:6px;">{score_html}{comments_html}u/{escape(p['author'])}</div>
       {body_html}
@@ -706,7 +706,7 @@ def build_section_html(subreddit, posts):
     return f"""
 <div style="margin:16px 0 10px 0;">
   <span style="display:inline-block; width:6px; height:6px; background:#4f46e5; border-radius:50%; margin-right:8px; vertical-align:middle;"></span>
-  <span style="color:#374151; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:15px; font-weight:700; vertical-align:middle;">r/{escape(subreddit)}</span>
+  <span style="color:#374151; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:15px; font-weight:700; vertical-align:middle;">r/{escape(subreddit)}</span>
 </div>
 {''.join(cards)}"""
 
@@ -757,7 +757,7 @@ def build_html(sections):
                 parts.append(f"""
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
   <tr><td>
-    <span style="display:inline-block; background:#eef2ff; color:#4f46e5; font-size:11px; font-weight:700; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; letter-spacing:0.6px; padding:5px 12px; border-radius:20px;">{escape(category.upper())}</span>
+    <span style="display:inline-block; background:#eef2ff; color:#4f46e5; font-size:11px; font-weight:700; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif; letter-spacing:0.6px; padding:5px 12px; border-radius:20px;">{escape(category.upper())}</span>
   </td></tr>
 </table>""")
                 last_category = category
@@ -785,8 +785,8 @@ def build_html(sections):
 <body style="margin:0; padding:20px; background:#f7f8fb;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px; margin-bottom:18px;">
     <tr><td style="background:#ffffff; border-radius:14px; padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);">
-      <div style="color:#111827; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:22px; font-weight:700;">&#128293; {total} Top Reddit Posts Today</div>
-      <div style="color:#6b7280; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:13px; margin-top:4px;">Across {len(sections)} subreddits</div>
+      <div style="color:#111827; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:22px; font-weight:700;">&#128293; {total} Top Reddit Posts Today</div>
+      <div style="color:#6b7280; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif; font-size:13px; margin-top:4px;">Across {len(sections)} subreddits</div>
     </td></tr>
   </table>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;">
@@ -799,7 +799,7 @@ def build_html(sections):
       </td>
     </tr>
   </table>
-  <p style="color:#999; font-size:12px; font-family:'Roboto','Open Sans',Arial,Helvetica,sans-serif; margin-top:20px;">
+  <p style="color:#999; font-size:12px; font-family:Inter,'Roboto','Open Sans',Arial,Helvetica,sans-serif; margin-top:20px;">
     Sent automatically by reddit-top-post-emailer via GitHub Actions.
   </p>
 </body>
