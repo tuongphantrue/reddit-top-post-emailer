@@ -110,7 +110,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-inter-font"
+SCRIPT_VERSION = "2026-07-sfw-nsfw-split"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
@@ -418,7 +418,7 @@ def fetch_post_detail(permalink):
     extract_top_comments) to find highly-upvoted replies, not just
     top-level comments.
     """
-    empty = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": []}
+    empty = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": [], "is_nsfw": False}
     if not permalink:
         return empty
 
@@ -440,6 +440,7 @@ def fetch_post_detail(permalink):
     score = post_data.get("score")
     comments = post_data.get("num_comments")
     domain = post_data.get("domain") if post_type == "Link" else None
+    is_nsfw = bool(post_data.get("over_18"))
 
     body_text = ""
     selftext = (post_data.get("selftext") or "").strip()
@@ -495,7 +496,7 @@ def fetch_post_detail(permalink):
             image_url = thumb
 
     return {"type": post_type, "score": score, "comments": comments, "domain": domain, "image": image_url,
-            "video": video_url, "body": body_text, "top_comments": top_comments}
+            "video": video_url, "body": body_text, "top_comments": top_comments, "is_nsfw": is_nsfw}
 
 
 def enrich_posts(posts):
@@ -504,11 +505,20 @@ def enrich_posts(posts):
     completely empty, stop trying further ones - a sign the cookie isn't
     working (e.g. expired) or is still being blocked, so retrying each
     remaining post would just waste time.
+
+    NOTE ON is_nsfw: defaults to False whenever it can't actually be
+    determined (no cookie configured, or a blocked/failed fetch) - a safe
+    default so an unknown-status post lands in the SFW email rather than
+    silently vanishing or misfiling as NSFW without real evidence either
+    way. Without REDDIT_COOKIE set, there's no way to reliably know a
+    post's NSFW status at all (that field isn't in the RSS listing), so
+    the SFW/NSFW split can't meaningfully work in that fallback mode -
+    everything just lands in the SFW email by default in that case.
     """
     if not REDDIT_COOKIE:
         print("  REDDIT_COOKIE not set - skipping type/image/video/body/score/comment enrichment (would likely be blocked anyway).")
         for p in posts:
-            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"] = None, None, None, None, None, None, "", []
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"], p["is_nsfw"] = None, None, None, None, None, None, "", [], False
         return posts
 
     consecutive_blocked = 0
@@ -518,14 +528,14 @@ def enrich_posts(posts):
             time.sleep(1)
 
         if consecutive_blocked >= 5:
-            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"] = None, None, None, None, None, None, "", []
+            p["type"], p["score"], p["comments"], p["domain"], p["image"], p["video"], p["body"], p["top_comments"], p["is_nsfw"] = None, None, None, None, None, None, "", [], False
             continue
 
         try:
             detail = fetch_post_detail(p["url"])
         except requests.RequestException as e:
             print(f"  detail fetch failed for '{p['title'][:40]}...': {e}", file=sys.stderr)
-            detail = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": []}
+            detail = {"type": None, "score": None, "comments": None, "domain": None, "image": None, "video": None, "body": "", "top_comments": [], "is_nsfw": False}
 
         if detail["score"] is None and detail["image"] is None and detail["video"] is None and not detail["body"]:
             consecutive_blocked += 1
@@ -541,6 +551,7 @@ def enrich_posts(posts):
         p["video"] = detail["video"]
         p["top_comments"] = detail["top_comments"]
         p["body"] = detail["body"]
+        p["is_nsfw"] = detail["is_nsfw"]
 
     print(f"  Got score/image/video/body for {got_content}/{len(posts)} post(s)")
     if consecutive_blocked >= 5:
@@ -908,12 +919,35 @@ def main():
         print(f"Category coverage: {len(other_subs)}/{len(sections)} subreddit(s) uncategorized "
               f"(shown under Other): {', '.join(sorted(other_subs))}")
 
-    subject = f"{total} top Reddit posts - {timestamp}"
+    # Split into two separate emails by NSFW status - each subreddit's
+    # post list gets divided, and a subreddit only appears in an email if
+    # it has at least one post landing in that half. Named plainly ("...
+    # 1" / "... 2") rather than labeling which is which in the subject
+    # line, by request.
+    sfw_sections, nsfw_sections = {}, {}
+    for sub, posts_list in sections.items():
+        sfw_list = [p for p in posts_list if not p.get("is_nsfw")]
+        nsfw_list = [p for p in posts_list if p.get("is_nsfw")]
+        if sfw_list:
+            sfw_sections[sub] = sfw_list
+        if nsfw_list:
+            nsfw_sections[sub] = nsfw_list
 
-    html = build_html(sections)
-    text = build_plain_text(sections)
+    sfw_total = sum(len(v) for v in sfw_sections.values())
+    nsfw_total = sum(len(v) for v in nsfw_sections.values())
+    print(f"Split: {sfw_total} SFW post(s), {nsfw_total} NSFW post(s)")
 
-    send_email(subject, html, text)
+    if sfw_total > 0:
+        subject1 = f"{sfw_total} top Reddit posts 1 - {timestamp}"
+        send_email(subject1, build_html(sfw_sections), build_plain_text(sfw_sections))
+    else:
+        print("No SFW posts this run - skipping email 1.")
+
+    if nsfw_total > 0:
+        subject2 = f"{nsfw_total} top Reddit posts 2 - {timestamp}"
+        send_email(subject2, build_html(nsfw_sections), build_plain_text(nsfw_sections))
+    else:
+        print("No NSFW posts this run - skipping email 2.")
 
 
 if __name__ == "__main__":
