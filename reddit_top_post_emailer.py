@@ -82,7 +82,17 @@ import requests
 
 # Reddit's public RSS feed for r/all's top posts (Atom format) - used for
 # the listing only, since it's confirmed reliable even without a cookie.
-REDDIT_RSS_URL = "https://www.reddit.com/r/all/top/.rss"
+#
+# Uses old.reddit.com rather than www.reddit.com: Reddit deprecated
+# standard entry points to r/all starting April 2026, and www.reddit.com
+# now silently redirects general r/all access toward a more-filtered
+# replacement feed. old.reddit.com still serves genuine r/all (Reddit has
+# said this will keep working), which is what actually includes non-
+# sexually-explicit NSFW content when the account's NSFW preference is
+# on - sexually explicit content itself is excluded from r/all no matter
+# which interface is used; that part is a firm Reddit policy, not
+# something this changes.
+REDDIT_RSS_URL = "https://old.reddit.com/r/all/top/.rss"
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
@@ -110,7 +120,7 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-sfw-nsfw-split"
+SCRIPT_VERSION = "2026-07-old-reddit-for-nsfw"
 
 SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
