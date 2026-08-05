@@ -72,7 +72,6 @@ import smtplib
 import ssl
 import sys
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -81,21 +80,6 @@ from html import escape
 import requests
 
 # Reddit's public RSS feed for r/all's top posts (Atom format) - used for
-# the listing only, since it's confirmed reliable even without a cookie.
-#
-# Uses old.reddit.com rather than www.reddit.com: Reddit deprecated
-# standard entry points to r/all starting April 2026, and www.reddit.com
-# now silently redirects general r/all access toward a more-filtered
-# replacement feed. old.reddit.com still serves genuine r/all (Reddit has
-# said this will keep working), which is what actually includes non-
-# sexually-explicit NSFW content when the account's NSFW preference is
-# on - sexually explicit content itself is excluded from r/all no matter
-# which interface is used; that part is a firm Reddit policy, not
-# something this changes.
-REDDIT_RSS_URL = "https://old.reddit.com/r/all/top/.rss"
-
-ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
-
 REDDIT_COOKIE = os.environ.get("REDDIT_COOKIE", "").strip()
 
 # A browser-like User-Agent tends to fare better against Reddit's bot
@@ -104,7 +88,7 @@ REDDIT_COOKIE = os.environ.get("REDDIT_COOKIE", "").strip()
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/atom+xml, application/xml, text/xml, */*",
+    "Accept": "application/json, text/plain, */*",
 }
 if REDDIT_COOKIE:
     HEADERS["Cookie"] = REDDIT_COOKIE
@@ -120,9 +104,8 @@ BLACKLIST_SUBREDDITS = {
 # log after deploying - the single most reliable way to confirm a push
 # actually took effect, since checking the file on GitHub's website has
 # repeatedly shown stale/cached content in this project's history.
-SCRIPT_VERSION = "2026-07-old-reddit-for-nsfw"
+SCRIPT_VERSION = "2026-07-json-listing"
 
-SUBREDDIT_FROM_URL_RE = re.compile(r"reddit\.com/r/([^/]+)/", re.IGNORECASE)
 # Matches a Reddit-hosted (or imgur) image URL that a commenter pasted
 # directly into their comment text - common as a bare "reaction image"
 # reply with no other words. Used to pull it out of the displayed comment
@@ -225,14 +208,27 @@ def classify_subreddit_category(subreddit):
 
 
 def fetch_top_posts(limit=50, timeframe="day", retries=3):
-    """Fetch the top N posts from r/all's RSS feed for the given timeframe.
-    Retries with backoff on 429 (rate limited).
+    """Fetch the top N posts from r/all's JSON listing for the given
+    timeframe. Retries with backoff on 429 (rate limited).
+
+    Switched from RSS to JSON here (previously used old.reddit.com's RSS
+    feed): even after enabling the account's NSFW preference and moving
+    the RSS fetch to old.reddit.com, the NSFW split kept coming back
+    empty. RSS is a different, older code path than the JSON API - it may
+    have its own independent content-safety filtering that doesn't track
+    the account's NSFW setting the same way JSON does, since JSON is the
+    same authenticated mechanism already proven reliable for per-post
+    score/image/comments. Worth testing whether this actually changes
+    the NSFW split's results, though it's also possible the underlying
+    cause is simpler: NSFW content may just rarely rank in the literal
+    top 50 of all of Reddit for a given day, regardless of feed source.
     """
+    url = "https://old.reddit.com/r/all/top.json"
     params = {"t": timeframe, "limit": limit}
 
     last_error = None
     for attempt in range(1, retries + 1):
-        resp = requests.get(REDDIT_RSS_URL, headers=HEADERS, params=params, timeout=15)
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
         if resp.status_code == 429:
             last_error = f"429 rate limited (attempt {attempt}/{retries})"
             if attempt < retries:
@@ -240,35 +236,26 @@ def fetch_top_posts(limit=50, timeframe="day", retries=3):
                 continue
             resp.raise_for_status()
         resp.raise_for_status()
-        root = ET.fromstring(resp.content)
+        data = resp.json()
         break
     else:
         raise requests.RequestException(last_error)
 
     posts = []
-    for entry in root.findall("atom:entry", ATOM_NS)[:limit]:
-        title_el = entry.find("atom:title", ATOM_NS)
-        title = title_el.text if title_el is not None else "Untitled post"
-
-        link = None
-        for link_el in entry.findall("atom:link", ATOM_NS):
-            href = link_el.get("href")
-            if href:
-                link = href
-                break
-
-        author_el = entry.find("atom:author/atom:name", ATOM_NS)
-        author = author_el.text.lstrip("/u/") if author_el is not None and author_el.text else "unknown"
-
-        sub_match = SUBREDDIT_FROM_URL_RE.search(link or "")
-        subreddit = sub_match.group(1) if sub_match else "unknown"
-
+    children = data.get("data", {}).get("children", [])[:limit]
+    nsfw_in_listing = 0
+    for child in children:
+        d = child.get("data", {})
+        if d.get("over_18"):
+            nsfw_in_listing += 1
         posts.append({
-            "title": title,
-            "author": author,
-            "url": link,
-            "subreddit": subreddit,
+            "title": d.get("title", "Untitled post"),
+            "author": d.get("author", "unknown"),
+            "url": f"https://old.reddit.com{d.get('permalink', '')}" if d.get("permalink") else None,
+            "subreddit": d.get("subreddit", "unknown"),
         })
+    print(f"  Listing itself reports {nsfw_in_listing}/{len(posts)} post(s) as over_18 "
+          f"(before any blacklist/enrichment filtering)")
     return posts
 
 
@@ -890,7 +877,7 @@ def main():
     try:
         posts = fetch_top_posts(limit=POSTS_TOTAL, timeframe=TIMEFRAME)
         print(f"  fetched {len(posts)} post(s)")
-    except (requests.RequestException, ET.ParseError) as e:
+    except requests.RequestException as e:
         print(f"  failed to fetch - {e}", file=sys.stderr)
         posts = []
 
